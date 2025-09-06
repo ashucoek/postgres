@@ -1,0 +1,41 @@
+name: Rebase fork
+
+on:
+  workflow_dispatch:     # manual trigger
+  schedule:
+    - cron: "0 3 * * *"  # optional: run daily at 3 AM UTC
+
+permissions:
+  contents: write        # needed for push
+
+jobs:
+  rebase:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0   # important: fetch full history for rebase
+
+      - name: Set up Git
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/postgres/postgres.git
+
+      - name: Fetch upstream
+        run: git fetch upstream
+
+      - name: Rebase onto upstream/master
+        run: |
+          git checkout master
+          git rebase upstream/master
+
+      - name: Push rebased branch
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }} master --force
