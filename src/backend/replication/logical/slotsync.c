@@ -218,6 +218,9 @@ update_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn),
 						  slot->data.catalog_xmin));
 
+		/* Update stats for slot sync skip */
+		pgstat_report_replslot_sync_skip(slot, SLOT_SYNC_SKIP_REMOTE_BEHIND);
+
 		if (remote_slot_precedes)
 			*remote_slot_precedes = true;
 
@@ -595,6 +598,9 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 				errdetail("Synchronization could lead to data loss, because the standby could not build a consistent snapshot to decode WALs at LSN %X/%08X.",
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn)));
 
+		/* Update stats for slot sync skip */
+		pgstat_report_replslot_sync_skip(slot, SLOT_SYNC_SKIP_NO_CONSISTENT_SNAPSHOT);
+
 		return false;
 	}
 
@@ -645,6 +651,10 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 					   LSN_FORMAT_ARGS(remote_slot->confirmed_lsn),
 					   remote_slot->name,
 					   LSN_FORMAT_ARGS(latestFlushPtr)));
+
+		/* Update stats for slot sync skip if slot exist on the standby */
+		if ((slot = SearchNamedReplicationSlot(remote_slot->name, true)))
+			pgstat_report_replslot_sync_skip(slot, SLOT_SYNC_SKIP_STANDBY_BEHIND);
 
 		return false;
 	}

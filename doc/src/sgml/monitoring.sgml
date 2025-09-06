@@ -1646,6 +1646,36 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>slot_sync_skip_count</structfield><type>bigint</type>
+       </para>
+       <para>
+        Number of times the slot sync is skipped.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>last_slot_sync_skip</structfield><type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which last slot sync was skipped.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>slot_sync_skip_reason</structfield><type>text</type>
+       </para>
+       <para>
+        Reason of the last slot sync skip.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
         <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
        </para>
        <para>

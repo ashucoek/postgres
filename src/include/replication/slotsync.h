@@ -23,6 +23,15 @@ extern PGDLLIMPORT bool sync_replication_slots;
 extern PGDLLIMPORT char *PrimaryConnInfo;
 extern PGDLLIMPORT char *PrimarySlotName;
 
+typedef enum SlotSyncSkipReason
+{
+	SLOT_SYNC_SKIP_NONE,		/* No skip */
+	SLOT_SYNC_SKIP_STANDBY_BEHIND,	/* Standby is behind the remote slot */
+	SLOT_SYNC_SKIP_REMOTE_BEHIND,	/* Remote slot is behind the local slot */
+	SLOT_SYNC_SKIP_NO_CONSISTENT_SNAPSHOT	/* Standby could not reach a
+											 * consistent snapshot */
+}			SlotSyncSkipReason;
+
 extern char *CheckAndGetDbnameFromConninfo(void);
 extern bool ValidateSlotSyncParams(int elevel);
 

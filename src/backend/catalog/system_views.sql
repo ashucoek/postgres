@@ -1061,6 +1061,9 @@ CREATE VIEW pg_stat_replication_slots AS
             s.stream_bytes,
             s.total_txns,
             s.total_bytes,
+            s.slot_sync_skip_count,
+            s.last_slot_sync_skip,
+			s.slot_sync_skip_reason,
             s.stats_reset
     FROM pg_replication_slots as r,
         LATERAL pg_stat_get_replication_slot(slot_name) as s
