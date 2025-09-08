@@ -64,6 +64,7 @@
 #include "storage/procarray.h"
 #include "tcop/tcopprot.h"
 #include "utils/builtins.h"
+#include "utils/memutils.h"
 #include "utils/pg_lsn.h"
 #include "utils/ps_status.h"
 #include "utils/timeout.h"
@@ -112,6 +113,7 @@ bool		sync_replication_slots = false;
  */
 #define MIN_SLOTSYNC_WORKER_NAPTIME_MS  200
 #define MAX_SLOTSYNC_WORKER_NAPTIME_MS  30000	/* 30s */
+#define SLOTSYNC_API_NAPTIME_MS         2000	/* 2s */
 
 static long sleep_ms = MIN_SLOTSYNC_WORKER_NAPTIME_MS;
 
@@ -124,6 +126,12 @@ static long sleep_ms = MIN_SLOTSYNC_WORKER_NAPTIME_MS;
  * performing slot synchronization.
  */
 static bool syncing_slots = false;
+
+/*
+ * Flag used by pg_sync_replication_slots()
+ * to do retries if the slot did not persist while syncing.
+ */
+static bool slot_persistence_pending = false;
 
 /*
  * Structure to hold information fetched from the primary server about a logical
@@ -145,6 +153,7 @@ typedef struct RemoteSlot
 	ReplicationSlotInvalidationCause invalidated;
 } RemoteSlot;
 
+static void ProcessSlotSyncInterrupts(void);
 static void slotsync_failure_callback(int code, Datum arg);
 static void update_synced_slots_inactive_since(void);
 
@@ -576,11 +585,15 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 		/*
 		 * The remote slot didn't catch up to locally reserved position.
 		 *
-		 * We do not drop the slot because the restart_lsn can be ahead of the
-		 * current location when recreating the slot in the next cycle. It may
-		 * take more time to create such a slot. Therefore, we keep this slot
-		 * and attempt the synchronization in the next cycle.
+		 * We do not drop the slot because the restart_lsn can be
+		 * ahead of the current location when recreating the slot in
+		 * the next cycle. It may take more time to create such a
+		 * slot. Therefore, we keep this slot and attempt the
+		 * synchronization in the next cycle. Update the
+		 * slot_persistence_pending flag, so the API can retry.
 		 */
+		slot_persistence_pending = true;
+
 		return false;
 	}
 
@@ -594,6 +607,9 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 				errmsg("could not synchronize replication slot \"%s\"", remote_slot->name),
 				errdetail("Synchronization could lead to data loss, because the standby could not build a consistent snapshot to decode WALs at LSN %X/%08X.",
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn)));
+
+		/* update flag, so that we retry */
+		slot_persistence_pending = true;
 
 		return false;
 	}
@@ -795,15 +811,23 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 }
 
 /*
- * Synchronize slots.
+ * Fetch remote slots.
  *
- * Gets the failover logical slots info from the primary server and updates
- * the slots locally. Creates the slots if not present on the standby.
+ * If slot_names is NIL, fetches all failover logical slots from the
+ * primary server, otherwise fetches only the ones with names in slot_names.
  *
- * Returns TRUE if any of the slots gets updated in this sync-cycle.
+ * Parameters:
+ *	wrconn - Connection to the primary server
+ *	slot_names - List of slot names (char *) to fetch from primary,
+ *				or NIL to fetch all failover logical slots.
+ *
+ * Returns:
+ *	List of remote slot information structures. Returns NIL if no slot
+ *	is found.
+ *
  */
-static bool
-synchronize_slots(WalReceiverConn *wrconn)
+static List *
+fetch_remote_slots(WalReceiverConn *wrconn, List *slot_names)
 {
 #define SLOTSYNC_COLUMN_COUNT 10
 	Oid			slotRow[SLOTSYNC_COLUMN_COUNT] = {TEXTOID, TEXTOID, LSNOID,
@@ -812,29 +836,46 @@ synchronize_slots(WalReceiverConn *wrconn)
 	WalRcvExecResult *res;
 	TupleTableSlot *tupslot;
 	List	   *remote_slot_list = NIL;
-	bool		some_slot_updated = false;
-	bool		started_tx = false;
-	const char *query = "SELECT slot_name, plugin, confirmed_flush_lsn,"
-		" restart_lsn, catalog_xmin, two_phase, two_phase_at, failover,"
-		" database, invalidation_reason"
-		" FROM pg_catalog.pg_replication_slots"
-		" WHERE failover and NOT temporary";
+	StringInfoData query;
+	ListCell   *lc;
+	bool		first_slot = true;
 
-	/* The syscache access in walrcv_exec() needs a transaction env. */
-	if (!IsTransactionState())
+	initStringInfo(&query);
+	appendStringInfoString(&query,
+				"SELECT slot_name, plugin, confirmed_flush_lsn,"
+				" restart_lsn, catalog_xmin, two_phase,"
+				" two_phase_at, failover,"
+				" database, invalidation_reason"
+				" FROM pg_catalog.pg_replication_slots"
+				" WHERE failover and NOT temporary");
+
+	if (slot_names != NIL)
 	{
-		StartTransactionCommand();
-		started_tx = true;
+		/*
+		 * Construct the query to fetch only the specified slots
+		 */
+		appendStringInfoString(&query, " AND slot_name IN (");
+
+		foreach(lc, slot_names)
+		{
+			char *slot_name = (char *) lfirst(lc);
+
+			if (!first_slot)
+				appendStringInfoString(&query, ", ");
+
+			appendStringInfo(&query, "'%s'", slot_name);
+			first_slot = false;
+		}
+		appendStringInfoString(&query, ")");
 	}
 
 	/* Execute the query */
-	res = walrcv_exec(wrconn, query, SLOTSYNC_COLUMN_COUNT, slotRow);
+	res = walrcv_exec(wrconn, query.data, SLOTSYNC_COLUMN_COUNT, slotRow);
 	if (res->status != WALRCV_OK_TUPLES)
 		ereport(ERROR,
 				errmsg("could not fetch failover logical slots info from the primary server: %s",
 					   res->err));
 
-	/* Construct the remote_slot tuple and synchronize each slot locally */
 	tupslot = MakeSingleTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple);
 	while (tuplestore_gettupleslot(res->tuplestore, true, false, tupslot))
 	{
@@ -885,7 +926,6 @@ synchronize_slots(WalReceiverConn *wrconn)
 		remote_slot->invalidated = isnull ? RS_INVAL_NONE :
 			GetSlotInvalidationCause(TextDatumGetCString(d));
 
-		/* Sanity check */
 		Assert(col == SLOTSYNC_COLUMN_COUNT);
 
 		/*
@@ -905,11 +945,29 @@ synchronize_slots(WalReceiverConn *wrconn)
 			remote_slot->invalidated == RS_INVAL_NONE)
 			pfree(remote_slot);
 		else
-			/* Create list of remote slots */
 			remote_slot_list = lappend(remote_slot_list, remote_slot);
 
 		ExecClearTuple(tupslot);
 	}
+
+	walrcv_clear_result(res);
+	pfree(query.data);
+
+	return remote_slot_list;
+}
+
+/*
+ * Synchronize slots.
+ *
+ * Takes a list of remote slots and synchronizes them locally. Creates the
+ * slots if not present on the standby and updates existing ones.
+ *
+ * Returns TRUE if any of the slots gets updated in this sync-cycle.
+ */
+static bool
+synchronize_slots(WalReceiverConn *wrconn, List *remote_slot_list)
+{
+	bool		some_slot_updated = false;
 
 	/* Drop local slots that no longer need to be synced. */
 	drop_local_obsolete_slots(remote_slot_list);
@@ -930,14 +988,6 @@ synchronize_slots(WalReceiverConn *wrconn)
 
 		UnlockSharedObject(DatabaseRelationId, remote_dbid, 0, AccessShareLock);
 	}
-
-	/* We are done, free remote_slot_list elements */
-	list_free_deep(remote_slot_list);
-
-	walrcv_clear_result(res);
-
-	if (started_tx)
-		CommitTransactionCommand();
 
 	return some_slot_updated;
 }
@@ -1130,7 +1180,7 @@ slotsync_reread_config(void)
 	bool		conninfo_changed;
 	bool		primary_slotname_changed;
 
-	Assert(sync_replication_slots);
+	Assert(!AmLogicalSlotSyncWorkerProcess() || sync_replication_slots);
 
 	ConfigReloadPending = false;
 	ProcessConfigFile(PGC_SIGHUP);
@@ -1237,6 +1287,7 @@ slotsync_worker_onexit(int code, Datum arg)
 	{
 		SlotSyncCtx->syncing = false;
 		syncing_slots = false;
+		slot_persistence_pending = false;
 	}
 
 	SpinLockRelease(&SlotSyncCtx->mutex);
@@ -1275,7 +1326,7 @@ wait_for_slot_activity(bool some_slot_updated)
 	rc = WaitLatch(MyLatch,
 				   WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
 				   sleep_ms,
-				   WAIT_EVENT_REPLICATION_SLOTSYNC_MAIN);
+				   WAIT_EVENT_REPLICATION_SLOTSYNC_PRIMARY_CATCHUP);
 
 	if (rc & WL_LATCH_SET)
 		ResetLatch(MyLatch);
@@ -1337,6 +1388,7 @@ reset_syncing_flag()
 	SpinLockRelease(&SlotSyncCtx->mutex);
 
 	syncing_slots = false;
+	slot_persistence_pending = false;
 };
 
 /*
@@ -1505,10 +1557,27 @@ ReplSlotSyncWorkerMain(const void *startup_data, size_t startup_data_len)
 	for (;;)
 	{
 		bool		some_slot_updated = false;
+		bool		started_tx = false;
+		List	   *remote_slots;
 
 		ProcessSlotSyncInterrupts();
 
-		some_slot_updated = synchronize_slots(wrconn);
+		/*
+		 * The syscache access in fetch_or_refresh_remote_slots() needs a
+		 * transaction env.
+		 */
+		if (!IsTransactionState())
+		{
+			StartTransactionCommand();
+			started_tx = true;
+		}
+
+		remote_slots = fetch_remote_slots(wrconn, NIL);
+		some_slot_updated = synchronize_slots(wrconn, remote_slots);
+		list_free_deep(remote_slots);
+
+		if (started_tx)
+			CommitTransactionCommand();
 
 		wait_for_slot_activity(some_slot_updated);
 	}
@@ -1736,25 +1805,181 @@ slotsync_failure_callback(int code, Datum arg)
 }
 
 /*
+ * Helper function to extract slot names from a list of remote slots
+ */
+static List *
+extract_slot_names(List *remote_slots)
+{
+	List		*slot_names = NIL;
+	ListCell	*lc;
+
+	foreach(lc, remote_slots)
+	{
+		RemoteSlot *remote_slot = (RemoteSlot *) lfirst(lc);
+		char       *slot_name;
+
+		/* Allocate slot name in current memory context */
+		slot_name = pstrdup(remote_slot->name);
+		slot_names = lappend(slot_names, slot_name);
+	}
+
+	return slot_names;
+}
+
+/*
+ * Re-read the config file for API context.
+ *
+ * Throws an error if conninfo, primary_slot_name or hot_standby_feedback changed.
+ */
+static void
+slotsync_api_reread_config(void)
+{
+	char       *old_primary_conninfo = pstrdup(PrimaryConnInfo);
+	char       *old_primary_slotname = pstrdup(PrimarySlotName);
+	bool        old_hot_standby_feedback = hot_standby_feedback;
+	bool        conninfo_changed;
+	bool        primary_slotname_changed;
+
+	ConfigReloadPending = false;
+	ProcessConfigFile(PGC_SIGHUP);
+
+	conninfo_changed = strcmp(old_primary_conninfo, PrimaryConnInfo) != 0;
+	primary_slotname_changed = strcmp(old_primary_slotname, PrimarySlotName) != 0;
+
+	pfree(old_primary_conninfo);
+	pfree(old_primary_slotname);
+
+	/* throw error for certain parameter changes */
+	if (conninfo_changed ||
+		primary_slotname_changed ||
+		(old_hot_standby_feedback != hot_standby_feedback))
+	{
+		ereport(ERROR,
+				(errcode(ERRCODE_CONFIG_FILE_ERROR),
+				 errmsg("cannot continue slot synchronization due to parameter changes"),
+				 errdetail("Critical replication parameters (primary_conninfo, primary_slot_name, or hot_standby_feedback) have changed since pg_sync_replication_slots() started."),
+				 errhint("Retry pg_sync_replication_slots() to use the updated configuration.")));
+	}
+}
+
+/*
  * Synchronize the failover enabled replication slots using the specified
  * primary server connection.
+ *
+ * Repeatedly fetches and updates replication slot information from the
+ * primary until all slots are at least "sync ready". Retry is done after 2
+ * sec wait. Exits early if promotion is triggered or certain critical
+ * configuration parameters have changed.
  */
 void
 SyncReplicationSlots(WalReceiverConn *wrconn)
 {
 	PG_ENSURE_ERROR_CLEANUP(slotsync_failure_callback, PointerGetDatum(wrconn));
 	{
+		List		*remote_slots = NIL;
+		List		*slot_names = NIL;  /* List of slot names to track */
+		MemoryContext oldcontext;
+
 		check_and_set_sync_info(InvalidPid);
 
 		validate_remote_info(wrconn);
 
-		synchronize_slots(wrconn);
+		/* Retry until all slots are sync ready atleast */
+		for (;;)
+		{
+			int		rc;
+			bool	started_tx = false;
+
+			/* reset flag before every iteration */
+			slot_persistence_pending = false;
+
+			/*
+			 * The syscache access in fetch_remote_slots() needs a
+			 * transaction env.
+			 */
+			if (!IsTransactionState()) {
+				StartTransactionCommand();
+				started_tx = true;
+			}
+
+			/*
+			 * Fetch remote_slots info for these slot_names, if slot_names
+			 * is NIL, fetch all the failover enabled slots.
+			 */
+			remote_slots = fetch_remote_slots(wrconn, slot_names);
+
+
+			/* Attempt to synchronize slots */
+			synchronize_slots(wrconn, remote_slots);
+
+			/*
+			 * If slot_persistence_pending is true, extract slot names
+			 * for future iterations (only needed if we haven't done it yet)
+			 */
+			if (slot_names == NIL && slot_persistence_pending)
+			{
+				/* Switch to long-lived TopMemoryContext to store slot names */
+				oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+
+				/* Extract slot names from the remote slots */
+				slot_names = extract_slot_names(remote_slots);
+
+				MemoryContextSwitchTo(oldcontext);
+			}
+
+			/* Free the current remote_slots list */
+			if (remote_slots)
+				list_free_deep(remote_slots);
+
+			/* Commit transaction if we started it */
+			if (started_tx)
+				CommitTransactionCommand();
+
+			/* Done if all slots are atleast sync ready */
+			if (!slot_persistence_pending)
+				break;
+
+			/* wait for 2 seconds before retrying */
+			rc = WaitLatch(MyLatch,
+					WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+					SLOTSYNC_API_NAPTIME_MS,
+					WAIT_EVENT_REPLICATION_SLOTSYNC_PRIMARY_CATCHUP);
+
+			if (rc & WL_LATCH_SET)
+				ResetLatch(MyLatch);
+
+			/*
+			 * If we've been promoted, then no point
+			 * continuing.
+			 */
+			if (SlotSyncCtx->stopSignaled)
+			{
+				ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("exiting from slot synchronization as"
+							" promotion is triggered")));
+				break;
+			}
+
+			/* error out if configuration parameters changed */
+			if (ConfigReloadPending)
+				slotsync_api_reread_config();
+		}
 
 		/* Cleanup the synced temporary slots */
 		ReplicationSlotCleanup(true);
 
 		/* We are done with sync, so reset sync flag */
 		reset_syncing_flag();
+
+		/* Clean up slot_names if allocated in TopMemoryContext */
+		if (slot_names)
+		{
+			oldcontext = MemoryContextSwitchTo(TopMemoryContext);
+			list_free_deep(slot_names);
+			MemoryContextSwitchTo(oldcontext);
+		}
+
 	}
 	PG_END_ENSURE_ERROR_CLEANUP(slotsync_failure_callback, PointerGetDatum(wrconn));
 }
