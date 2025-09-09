@@ -27,6 +27,7 @@
 
 #include "replication/slot.h"
 #include "utils/pgstat_internal.h"
+#include "replication/slotsync.h"
 
 
 static int	get_replslot_index(const char *name, bool need_lock);
@@ -97,6 +98,41 @@ pgstat_report_replslot(ReplicationSlot *slot, const PgStat_StatReplSlotEntry *re
 	REPLSLOT_ACC(total_txns);
 	REPLSLOT_ACC(total_bytes);
 #undef REPLSLOT_ACC
+
+	pgstat_unlock_entry(entry_ref);
+}
+
+/*
+ * Report replication slot sync skip statistics
+ *
+ * We can rely on the stats for the slot to exist and to belong to this
+ * slot. We can only get here if pgstat_create_replslot() or
+ * pgstat_acquire_replslot() have already been called.
+ */
+void
+pgstat_report_replslot_sync_skip(ReplicationSlot *slot, SlotSyncSkipReason reason)
+{
+	PgStat_EntryRef *entry_ref;
+	PgStatShared_ReplSlot *shstatent;
+	PgStat_StatReplSlotEntry *statent;
+
+	entry_ref = pgstat_get_entry_ref_locked(PGSTAT_KIND_REPLSLOT, InvalidOid,
+											ReplicationSlotIndex(slot), false);
+	shstatent = (PgStatShared_ReplSlot *) entry_ref->shared_stats;
+	statent = &shstatent->stats;
+
+	if (reason != SLOT_SYNC_SKIP_NONE)
+	{
+		statent->slot_sync_skip_count += 1;
+		statent->last_slot_sync_skip = GetCurrentTimestamp();
+		statent->slot_sync_skip_reason = reason;
+	}
+	else
+	{
+		statent->slot_sync_skip_count = 0;
+		statent->last_slot_sync_skip = 0;
+		statent->slot_sync_skip_reason = SLOT_SYNC_SKIP_NONE;
+	}
 
 	pgstat_unlock_entry(entry_ref);
 }
