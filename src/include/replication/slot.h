@@ -336,6 +336,7 @@ extern int	ReplicationSlotIndex(ReplicationSlot *slot);
 extern bool ReplicationSlotName(int index, Name name);
 extern void ReplicationSlotNameForTablesync(Oid suboid, Oid relid, char *syncslotname, Size szslot);
 extern void ReplicationSlotDropAtPubNode(WalReceiverConn *wrconn, char *slotname, bool missing_ok);
+extern void ResetSyncedSlots(void);
 
 extern void StartupReplicationSlots(void);
 extern void CheckPointReplicationSlots(bool is_shutdown);
