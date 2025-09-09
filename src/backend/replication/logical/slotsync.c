@@ -148,6 +148,23 @@ typedef struct RemoteSlot
 static void slotsync_failure_callback(int code, Datum arg);
 static void update_synced_slots_inactive_since(void);
 
+/* Update slot sync skip stats */
+static void
+update_slot_sync_skip_stats(ReplicationSlot *slot, SlotSyncSkipReason skip_reason)
+{
+	/*
+	 * Update the slot sync related stats in pg_stat_replication_slot when a
+	 * slot sync is skipped
+	 */
+	if (skip_reason != SLOT_SYNC_SKIP_NONE)
+		pgstat_report_replslot_sync_skip(slot);
+
+	/* Update the slot sync reason */
+	SpinLockAcquire(&slot->mutex);
+	slot->slot_sync_skip_reason = skip_reason;
+	SpinLockRelease(&slot->mutex);
+}
+
 /*
  * If necessary, update the local synced slot's metadata based on the data
  * from the remote slot.
@@ -165,7 +182,8 @@ static void update_synced_slots_inactive_since(void);
 static bool
 update_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 						 bool *found_consistent_snapshot,
-						 bool *remote_slot_precedes)
+						 bool *remote_slot_precedes,
+						 SlotSyncSkipReason * skip_reason)
 {
 	ReplicationSlot *slot = MyReplicationSlot;
 	bool		updated_xmin_or_lsn = false;
@@ -217,6 +235,8 @@ update_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid,
 						  remote_slot->catalog_xmin,
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn),
 						  slot->data.catalog_xmin));
+
+		*skip_reason = SLOT_SYNC_SKIP_REMOTE_BEHIND;
 
 		if (remote_slot_precedes)
 			*remote_slot_precedes = true;
@@ -557,7 +577,8 @@ reserve_wal_for_local_slot(XLogRecPtr restart_lsn)
  * false.
  */
 static bool
-update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
+update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid,
+									 SlotSyncSkipReason * skip_reason)
 {
 	ReplicationSlot *slot = MyReplicationSlot;
 	bool		found_consistent_snapshot = false;
@@ -565,7 +586,7 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 
 	(void) update_local_synced_slot(remote_slot, remote_dbid,
 									&found_consistent_snapshot,
-									&remote_slot_precedes);
+									&remote_slot_precedes, skip_reason);
 
 	/*
 	 * Check if the primary server has caught up. Refer to the comment atop
@@ -594,6 +615,8 @@ update_and_persist_local_synced_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 				errmsg("could not synchronize replication slot \"%s\"", remote_slot->name),
 				errdetail("Synchronization could lead to data loss, because the standby could not build a consistent snapshot to decode WALs at LSN %X/%08X.",
 						  LSN_FORMAT_ARGS(slot->data.restart_lsn)));
+
+		*skip_reason = SLOT_SYNC_SKIP_NO_CONSISTENT_SNAPSHOT;
 
 		return false;
 	}
@@ -626,6 +649,7 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 	ReplicationSlot *slot;
 	XLogRecPtr	latestFlushPtr;
 	bool		slot_updated = false;
+	SlotSyncSkipReason skip_reason = SLOT_SYNC_SKIP_NONE;
 
 	/*
 	 * Make sure that concerned WAL is received and flushed before syncing
@@ -646,7 +670,11 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 					   remote_slot->name,
 					   LSN_FORMAT_ARGS(latestFlushPtr)));
 
-		return false;
+		/* If slot is present on the local, update the slot sync skip stats */
+		if ((slot = SearchNamedReplicationSlot(remote_slot->name, true)))
+			skip_reason = SLOT_SYNC_SKIP_STANDBY_BEHIND;
+		else
+			return false;
 	}
 
 	/* Search for the named slot */
@@ -657,6 +685,17 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 		SpinLockAcquire(&slot->mutex);
 		synced = slot->data.synced;
 		SpinLockRelease(&slot->mutex);
+
+		/*
+		 * If standby is behind remote slot and the synced slot is present on
+		 * local.
+		 */
+		if (remote_slot->confirmed_lsn > latestFlushPtr)
+		{
+			if (synced)
+				update_slot_sync_skip_stats(slot, skip_reason);
+			return false;
+		}
 
 		/* User-created slot with the same name exists, raise ERROR. */
 		if (!synced)
@@ -715,7 +754,8 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 		if (slot->data.persistency == RS_TEMPORARY)
 		{
 			slot_updated = update_and_persist_local_synced_slot(remote_slot,
-																remote_dbid);
+																remote_dbid,
+																&skip_reason);
 		}
 
 		/* Slot ready for sync, so sync it. */
@@ -737,7 +777,7 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 										   LSN_FORMAT_ARGS(remote_slot->confirmed_lsn)));
 
 			slot_updated = update_local_synced_slot(remote_slot, remote_dbid,
-													NULL, NULL);
+													NULL, NULL, &skip_reason);
 		}
 	}
 	/* Otherwise create the slot first. */
@@ -784,10 +824,17 @@ synchronize_one_slot(RemoteSlot *remote_slot, Oid remote_dbid)
 		ReplicationSlotsComputeRequiredXmin(true);
 		LWLockRelease(ProcArrayLock);
 
-		update_and_persist_local_synced_slot(remote_slot, remote_dbid);
+		update_and_persist_local_synced_slot(remote_slot, remote_dbid,
+											 &skip_reason);
 
 		slot_updated = true;
 	}
+
+	/*
+	 * If slot sync is skipped update the reason and stats. Else reset the
+	 * reason to 'none' on successful slot sync.
+	 */
+	update_slot_sync_skip_stats(slot, skip_reason);
 
 	ReplicationSlotRelease();
 
