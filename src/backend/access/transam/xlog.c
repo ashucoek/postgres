@@ -5622,9 +5622,14 @@ StartupXLOG(void)
 
 	/*
 	 * Initialize replication slots, before there's a chance to remove
-	 * required resources.
+	 * required resources. Clear any leftover 'synced' flags on replication
+	 * slots when in crash recovery on the primary. The DB_IN_CRASH_RECOVERY
+	 * state check ensures that this code is only reached when a standby
+	 * server crashes during promotion.
 	 */
 	StartupReplicationSlots();
+	if (ControlFile->state == DB_IN_CRASH_RECOVERY)
+		ResetSyncedSlots();
 
 	/*
 	 * Startup logical state, needs to be setup now so we have proper data
@@ -6224,13 +6229,18 @@ StartupXLOG(void)
 	WalSndWakeup(true, true);
 
 	/*
-	 * If this was a promotion, request an (online) checkpoint now. This isn't
-	 * required for consistency, but the last restartpoint might be far back,
-	 * and in case of a crash, recovering from it might take a longer than is
-	 * appropriate now that we're not in standby mode anymore.
+	 * If this was a promotion, first reset any slots that had been marked as
+	 * synced during standby mode. Then request an (online) checkpoint.
+	 * The checkpoint isn't required for consistency, but the last
+	 * restartpoint might be far back, and in case of a crash, recovery
+	 * could take longer than desirable now that we're not in standby
+	 * mode anymore.
 	 */
 	if (promoted)
+	{
+		ResetSyncedSlots();
 		RequestCheckpoint(CHECKPOINT_FORCE);
+	}
 }
 
 /*

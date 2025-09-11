@@ -932,13 +932,13 @@ my $standby1_conninfo = $standby1->connstr . ' dbname=postgres';
 $subscriber1->safe_psql('postgres',
 	"ALTER SUBSCRIPTION regress_mysub1 CONNECTION '$standby1_conninfo';");
 
-# Confirm the synced slot 'lsub1_slot' is retained on the new primary
+# Confirm the synced slot 'lsub1_slot' is reset on the new primary
 is( $standby1->safe_psql(
 		'postgres',
 		q{SELECT count(*) = 2 FROM pg_replication_slots WHERE slot_name IN ('lsub1_slot', 'snap_test_slot') AND synced AND NOT temporary;}
 	),
-	't',
-	'synced slot retained on the new primary');
+	'f',
+	'synced slot reset on the new primary');
 
 # Commit the prepared transaction
 $standby1->safe_psql('postgres', "COMMIT PREPARED 'test_twophase_slotsync';");

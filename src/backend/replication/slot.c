@@ -853,6 +853,57 @@ restart:
 }
 
 /*
+ * ResetSyncedSlots()
+ *
+ * Reset all replication slots that have synced=true to synced=false.
+ */
+void
+ResetSyncedSlots(void)
+{
+	int			i;
+
+	/*
+	 * Iterate through all replication slot entries and reset synced ones
+	 */
+	for (i = 0; i < max_replication_slots; i++)
+	{
+		ReplicationSlot *s = &ReplicationSlotCtl->replication_slots[i];
+
+		/* Skip inactive/unused slots */
+		if (!s->in_use)
+			continue;
+
+		/* we're only interested in logical slots */
+		if (!SlotIsLogical(s))
+			continue;
+
+		/* Check if this slot was marked as synced */
+		if (s->data.synced)
+		{
+			/* Acquire the slot */
+			ReplicationSlotAcquire(NameStr(s->data.name), false, true);
+
+			/* Reset the synced flag under spinlock protection */
+			SpinLockAcquire(&s->mutex);
+			s->data.synced = false;
+			SpinLockRelease(&s->mutex);
+
+			/* Mark dirty and save outside the spinlock */
+			ReplicationSlotMarkDirty();
+			ReplicationSlotSave();
+
+			ereport(LOG,
+				(errmsg("reset synced flag for replication slot \"%s\"",
+					NameStr(s->data.name))));
+
+			/* Release the slot */
+			ReplicationSlotRelease();
+		}
+	}
+
+}
+
+/*
  * Permanently drop replication slot identified by the passed in name.
  */
 void
@@ -2212,6 +2263,7 @@ StartupReplicationSlots(void)
 		/* we crashed while a slot was being setup or deleted, clean up */
 		if (pg_str_endswith(replication_de->d_name, ".tmp"))
 		{
+			elog(LOG, "there was a leftover tmp file for slots");
 			if (!rmtree(path, true))
 			{
 				ereport(WARNING,
