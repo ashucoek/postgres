@@ -2745,53 +2745,20 @@ GetSlotInvalidationCauseName(ReplicationSlotInvalidationCause cause)
 static bool
 validate_sync_standby_slots(char *rawname, List **elemlist)
 {
-	bool		ok;
-
 	/* Verify syntax and parse string into a list of identifiers */
-	ok = SplitIdentifierString(rawname, ',', elemlist);
-
-	if (!ok)
+	if (!SplitIdentifierString(rawname, ',', elemlist))
 	{
 		GUC_check_errdetail("List syntax is invalid.");
+		return false;
 	}
-	else if (MyProc)
+
+	foreach_ptr(char, name, *elemlist)
 	{
-		/*
-		 * Check that each specified slot exist and is physical.
-		 *
-		 * Because we need an LWLock, we cannot do this on processes without a
-		 * PGPROC, so we skip it there; but see comments in
-		 * StandbySlotsHaveCaughtup() as to why that's not a problem.
-		 */
-		LWLockAcquire(ReplicationSlotControlLock, LW_SHARED);
-
-		foreach_ptr(char, name, *elemlist)
-		{
-			ReplicationSlot *slot;
-
-			slot = SearchNamedReplicationSlot(name, false);
-
-			if (!slot)
-			{
-				GUC_check_errdetail("Replication slot \"%s\" does not exist.",
-									name);
-				ok = false;
-				break;
-			}
-
-			if (!SlotIsPhysical(slot))
-			{
-				GUC_check_errdetail("\"%s\" is not a physical replication slot.",
-									name);
-				ok = false;
-				break;
-			}
-		}
-
-		LWLockRelease(ReplicationSlotControlLock);
+		if (!ReplicationSlotValidateName(name, false, WARNING))
+			return false;
 	}
 
-	return ok;
+	return true;
 }
 
 /*
@@ -2949,12 +2916,6 @@ StandbySlotsHaveCaughtup(XLogRecPtr wait_for_lsn, int elevel)
 		/*
 		 * If a slot name provided in synchronized_standby_slots does not
 		 * exist, report a message and exit the loop.
-		 *
-		 * Though validate_sync_standby_slots (the GUC check_hook) tries to
-		 * avoid this, it can nonetheless happen because the user can specify
-		 * a nonexistent slot name before server startup. That function cannot
-		 * validate such a slot during startup, as ReplicationSlotCtl is not
-		 * initialized by then.  Also, the user might have dropped one slot.
 		 */
 		if (!slot)
 		{

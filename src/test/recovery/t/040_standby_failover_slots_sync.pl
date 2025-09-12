@@ -966,4 +966,38 @@ $result = $standby1->safe_psql('postgres',
 
 is($result, '1', "data can be consumed using snap_test_slot");
 
+##################################################
+# Test for GUC synchronized standby slots
+##################################################
+
+# Cannot be set synchronized_standby_slots to a reserved slot name
+($result, $stdout, $stderr) = $primary->psql('postgres',
+	"ALTER SYSTEM SET synchronized_standby_slots='pg_conflict_detection'");
+ok( $stderr =~
+	  m/WARNING:  replication slot name "pg_conflict_detection" is reserved/,
+	"Cannot use a reserverd slot name");
+
+# Cannot be set synchronized_standby_slots to slot name with invalid characters
+($result, $stdout, $stderr) = $primary->psql('postgres',
+	"ALTER SYSTEM SET synchronized_standby_slots='invalid*'");
+ok( $stderr =~
+	  m/WARNING:  replication slot name "invalid\*" contains invalid character/,
+	"Cannot use a invalid slot name");
+
+# Can set synchronized_standby_slots to a non-existent slot name
+$primary->safe_psql(
+	'postgres', qq[
+	ALTER SYSTEM SET synchronized_standby_slots='missing';
+	SELECT pg_reload_conf();
+]);
+
+# Parallel worker does not throw error during startup.
+$primary->safe_psql(
+	'postgres', qq[
+	SET min_parallel_table_scan_size TO 0;
+	SET parallel_setup_cost TO 0;
+	SET parallel_tuple_cost TO 0;
+	SELECT * from pg_namespace;
+]);
+
 done_testing();
