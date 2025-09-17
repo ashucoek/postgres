@@ -537,9 +537,162 @@ my $sysid_s = $node_s->safe_psql('postgres',
 	'SELECT system_identifier FROM pg_control_system()');
 ok($sysid_p != $sysid_s, 'system identifier was changed');
 
+# Create user-defined publications.
+$node_p->safe_psql($db1,
+	"CREATE PUBLICATION test_pub_existing FOR TABLE tbl1");
+
+# Initialize node_s2 and node_s3 as a fresh standby of node_p for existing/new
+# publication test.
+$node_p->backup('backup_tablepub');
+my $node_s2 = PostgreSQL::Test::Cluster->new('node_s2');
+$node_s2->init_from_backup($node_p, 'backup_tablepub', has_streaming => 1);
+$node_s2->start;
+$node_s2->stop;
+
+my $node_s3 = PostgreSQL::Test::Cluster->new('node_s3');
+$node_s3->init_from_backup($node_p, 'backup_tablepub', has_streaming => 1);
+
+# Run pg_createsubscriber on node S2 with --dry-run
+($stdout, $stderr) = run_command(
+	[
+		'pg_createsubscriber',
+		'--verbose',
+		'--dry-run',
+		'--pgdata' => $node_s2->data_dir,
+		'--publisher-server' => $node_p->connstr($db1),
+		'--socketdir' => $node_s2->host,
+		'--subscriber-port' => $node_s2->port,
+		'--database' => $db1,
+		'--database' => $db2,
+		'--publication' => 'test_pub_existing',
+		'--publication' => 'test_pub_new',
+	],
+	'run pg_createsubscriber --dry-run on node S2');
+
+like(
+	$stderr,
+	qr/using existing publication "test_pub_existing"/,
+	'dry-run logs reuse of existing publication');
+like(
+	$stderr,
+	qr/created publication "test_pub_new"/,
+	'dry-run logs creation of new publication');
+
+# Verify the existing publication is still there and unchanged
+my $existing_pub_count = $node_p->safe_psql($db1,
+	"SELECT COUNT(*) FROM pg_publication WHERE pubname = 'test_pub_existing'"
+);
+is($existing_pub_count, '1',
+	'existing publication remains unchanged after dry-run');
+
+# Verify no actual publications were created during dry-run
+my $pub_count_after_dry_run = $node_p->safe_psql($db2,
+	"SELECT COUNT(*) FROM pg_publication WHERE pubname = 'test_pub_new'");
+is($pub_count_after_dry_run, '0',
+	'dry-run did not actually create publications');
+
+# Run pg_createsubscriber on node S2 without --dry-run
+command_ok(
+	[
+		'pg_createsubscriber',
+		'--verbose', '--verbose',
+		'--recovery-timeout' => $PostgreSQL::Test::Utils::timeout_default,
+		'--pgdata' => $node_s2->data_dir,
+		'--publisher-server' => $node_p->connstr($db1),
+		'--socketdir' => $node_s2->host,
+		'--subscriber-port' => $node_s2->port,
+		'--database' => $db1,
+		'--database' => $db2,
+		'--publication' => 'test_pub_existing',
+		'--publication' => 'test_pub_new',
+	],
+	'run pg_createsubscriber on node S2');
+
+# Start subscriber
+$node_s2->start;
+
+# Verify that test_pub_new was created in db2
+$result = $node_p->safe_psql($db2,
+	"SELECT COUNT(*) FROM pg_publication WHERE pubname = 'test_pub_new'");
+is($result, '1', 'test_pub_new publication was created in db2');
+
+# Insert rows on P
+$node_p->safe_psql($db1, "INSERT INTO tbl1 VALUES('fourth row')");
+$node_p->safe_psql($db2, "INSERT INTO tbl2 VALUES('row 2')");
+
+# Get subscription names and publications
+$result = $node_s2->safe_psql(
+	'postgres', qq(
+    SELECT subname, subpublications FROM pg_subscription WHERE subname ~ '^pg_createsubscriber_'
+));
+@subnames = split("\n", $result);
+
+# Check result in database $db1
+$result = $node_s2->safe_psql($db1, 'SELECT * FROM tbl1');
+is( $result, qq(first row
+second row
+third row
+fourth row),
+	"logical replication works in database $db1");
+
+# Check result in database $db2
+$result = $node_s2->safe_psql($db2, 'SELECT * FROM tbl2');
+is( $result, qq(row 1
+row 2),
+	"logical replication works in database $db2");
+
+# Verify that the correct publications are being used
+$result = $node_s2->safe_psql(
+	'postgres', qq(
+        SELECT s.subpublications
+        FROM pg_subscription s
+        WHERE s.subname ~ '^pg_createsubscriber_'
+        ORDER BY s.subdbid
+    )
+);
+
+is( $result, qq({test_pub_existing}
+{test_pub_new}),
+	"subscriptions use the correct publications");
+
+$node_s3->start;
+$node_s3->stop;
+
+# Run pg_createsubscriber on node S3 without --dry-run and --clean option
+# to verify that the existing publications are preserved.
+command_ok(
+	[
+		'pg_createsubscriber',
+		'--verbose', '--verbose',
+		'--recovery-timeout' => $PostgreSQL::Test::Utils::timeout_default,
+		'--pgdata' => $node_s3->data_dir,
+		'--publisher-server' => $node_p->connstr($db1),
+		'--socketdir' => $node_s3->host,
+		'--subscriber-port' => $node_s3->port,
+		'--database' => $db1,
+		'--database' => $db2,
+		'--publication' => 'test_pub_existing',
+		'--publication' => 'test_pub_new',
+		'--clean' => 'publications',
+	],
+	'run pg_createsubscriber on node S3');
+
+# Start subscriber
+$node_s3->start;
+
+# Confirm publication created by pg_createsubscriber is removed
+is( $node_s3->safe_psql(
+		$db1,
+		"SELECT COUNT(*) FROM pg_publication WHERE pubname = 'test_pub_new';"
+	),
+	'0',
+	'publication created by pg_createsubscriber have been removed');
+
 # clean up
 $node_p->teardown_node;
 $node_s->teardown_node;
+$node_s2->teardown_node;
+$node_s3->teardown_node;
 $node_t->teardown_node;
 $node_f->teardown_node;
 

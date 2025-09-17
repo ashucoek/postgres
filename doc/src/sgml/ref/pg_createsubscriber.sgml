@@ -246,6 +246,14 @@ PostgreSQL documentation
           other publications replicated from the source server to be dropped as
           well.
          </para>
+         <para>
+          When publications are reused, they will not be dropped during cleanup
+          operations, ensuring they remain available for other uses.
+          Only publications created by
+          <application>pg_createsubscriber</application> on the target server
+          will be cleaned up if the operation fails. Publications on the
+          publisher server are never modified or dropped by cleanup operations.
+         </para>
         </listitem>
        </itemizedlist>
       </para>
@@ -284,6 +292,17 @@ PostgreSQL documentation
        match the order of database switches.  If this option is not specified,
        a generated name is assigned to the publication name. This option cannot
        be used together with <option>--all</option>.
+      </para>
+      <para>
+       If a publication with the specified name already exists on the publisher,
+       it will be reused as-is with its current configuration, including its
+       table list, row filters, column filters, and all other settings.
+       If a publication does not exist, it will be created automatically with
+       <literal>FOR ALL TABLES</literal>.
+      </para>
+      <para>
+       Use <option>--dry-run</option> to see which publications will be reused
+       and which will be created before running the actual command.
       </para>
      </listitem>
     </varlistentry>

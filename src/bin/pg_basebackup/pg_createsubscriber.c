@@ -114,6 +114,7 @@ static void stop_standby_server(const char *datadir);
 static void wait_for_end_recovery(const char *conninfo,
 								  const struct CreateSubscriberOptions *opt);
 static void create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo);
+static bool check_publication_exists(PGconn *conn, const char *pubname, const char *dbname);
 static void drop_publication(PGconn *conn, const char *pubname,
 							 const char *dbname, bool *made_publication);
 static void check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo);
@@ -754,6 +755,32 @@ generate_object_name(PGconn *conn)
 }
 
 /*
+ * Check if a publication with the given name exists in the specified database.
+ * Returns true if it exists, false otherwise.
+ */
+static bool
+check_publication_exists(PGconn *conn, const char *pubname, const char *dbname)
+{
+	PGresult   *res;
+	bool		exists;
+	char	   *query;
+
+	query = psprintf("SELECT 1 FROM pg_publication WHERE pubname = %s",
+					 PQescapeLiteral(conn, pubname, strlen(pubname)));
+	res = PQexec(conn, query);
+
+	if (PQresultStatus(res) != PGRES_TUPLES_OK)
+		pg_fatal("could not check for publication \"%s\" in database \"%s\": %s",
+				 pubname, dbname, PQerrorMessage(conn));
+
+	exists = (PQntuples(res) == 1);
+
+	PQclear(res);
+	pg_free(query);
+	return exists;
+}
+
+/*
  * Create the publications and replication slots in preparation for logical
  * replication. Returns the LSN from latest replication slot. It will be the
  * replication start point that is used to adjust the subscriptions (see
@@ -789,13 +816,27 @@ setup_publisher(struct LogicalRepInfo *dbinfo)
 		if (num_replslots == 0)
 			dbinfo[i].replslotname = pg_strdup(dbinfo[i].subname);
 
-		/*
-		 * Create publication on publisher. This step should be executed
-		 * *before* promoting the subscriber to avoid any transactions between
-		 * consistent LSN and the new publication rows (such transactions
-		 * wouldn't see the new publication rows resulting in an error).
-		 */
-		create_publication(conn, &dbinfo[i]);
+		if (check_publication_exists(conn, dbinfo[i].pubname, dbinfo[i].dbname))
+		{
+			/* Reuse existing publication on publisher. */
+			pg_log_info("using existing publication \"%s\" in database \"%s\"",
+						dbinfo[i].pubname, dbinfo[i].dbname);
+			dbinfo[i].made_publication = false;
+		}
+		else
+		{
+			/*
+			 * Create publication on publisher. This step should be executed
+			 * *before* promoting the subscriber to avoid any transactions
+			 * between consistent LSN and the new publication rows (such
+			 * transactions wouldn't see the new publication rows resulting in
+			 * an error).
+			 */
+			create_publication(conn, &dbinfo[i]);
+			pg_log_info("created publication \"%s\" in database \"%s\"",
+						dbinfo[i].pubname, dbinfo[i].dbname);
+			dbinfo[i].made_publication = true;
+		}
 
 		/* Create replication slot on publisher */
 		if (lsn)
@@ -1760,19 +1801,27 @@ check_and_drop_publications(PGconn *conn, struct LogicalRepInfo *dbinfo)
 
 		/* Drop each publication */
 		for (int i = 0; i < PQntuples(res); i++)
-			drop_publication(conn, PQgetvalue(res, i, 0), dbinfo->dbname,
-							 &dbinfo->made_publication);
-
+		{
+			if (dbinfo->made_publication)
+				drop_publication(conn, PQgetvalue(res, i, 0), dbinfo->dbname,
+								 &dbinfo->made_publication);
+		}
 		PQclear(res);
 	}
 
 	/*
-	 * In dry-run mode, we don't create publications, but we still try to drop
-	 * those to provide necessary information to the user.
+	 * Only drop publications that were created by pg_createsubscriber during
+	 * this operation. Pre-existing publications are preserved.
 	 */
 	if (!drop_all_pubs || dry_run)
-		drop_publication(conn, dbinfo->pubname, dbinfo->dbname,
-						 &dbinfo->made_publication);
+	{
+		if (dbinfo->made_publication)
+			drop_publication(conn, dbinfo->pubname, dbinfo->dbname,
+							 &dbinfo->made_publication);
+		else
+			pg_log_info("preserving existing publication \"%s\" in database \"%s\"",
+						dbinfo->pubname, dbinfo->dbname);
+	}
 }
 
 /*
