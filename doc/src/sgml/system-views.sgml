@@ -3031,8 +3031,7 @@ SELECT * FROM pg_locks pl LEFT JOIN pg_prepared_xacts ppx
        On a hot standby, the slots with the synced column marked as true can
        neither be used for logical decoding nor dropped manually. The value
        of this column has no meaning on the primary server; the column value on
-       the primary is default false for all slots but may (if leftover from a
-       promoted standby) also be true.
+       the primary is false for all slots.
       </para></entry>
      </row>
 
