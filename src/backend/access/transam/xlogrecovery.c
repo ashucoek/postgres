@@ -4761,7 +4761,7 @@ bool
 check_primary_slot_name(char **newval, void **extra, GucSource source)
 {
 	if (*newval && strcmp(*newval, "") != 0 &&
-		!ReplicationSlotValidateName(*newval, false, WARNING))
+		!ReplicationSlotValidateName(*newval, false, 0))
 		return false;
 
 	return true;

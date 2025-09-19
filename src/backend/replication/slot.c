@@ -258,7 +258,12 @@ ReplicationSlotShmemExit(int code, Datum arg)
 }
 
 /*
- * Check whether the passed slot name is valid and report errors at elevel.
+ * Check whether the passed slot name is valid and report errors.
+ *
+ * When called from a GUC check hook, elevel must be 0. In that case,
+ * errors are reported as additional details or hints using
+ * GUC_check_errdetail() and GUC_check_errhint(). Otherwise, elevel
+ * must be nonzero, and errors are reported at that log level with ereport().
  *
  * An error will be reported for a reserved replication slot name if
  * allow_reserved_name is set to false.
@@ -266,30 +271,29 @@ ReplicationSlotShmemExit(int code, Datum arg)
  * Slot names may consist out of [a-z0-9_]{1,NAMEDATALEN-1} which should allow
  * the name to be used as a directory name on every supported OS.
  *
- * Returns whether the directory name is valid or not if elevel < ERROR.
+ * Returns whether the slot name is valid or not if elevel < ERROR.
  */
 bool
 ReplicationSlotValidateName(const char *name, bool allow_reserved_name,
 							int elevel)
 {
 	const char *cp;
+	int			err_code = 0;
+	char	   *err_msg = NULL;
+	char	   *err_hint = NULL;
 
 	if (strlen(name) == 0)
 	{
-		ereport(elevel,
-				(errcode(ERRCODE_INVALID_NAME),
-				 errmsg("replication slot name \"%s\" is too short",
-						name)));
-		return false;
+		err_code = ERRCODE_INVALID_NAME;
+		err_msg = psprintf(_("replication slot name \"%s\" is too short"), name);
+		goto error;
 	}
 
 	if (strlen(name) >= NAMEDATALEN)
 	{
-		ereport(elevel,
-				(errcode(ERRCODE_NAME_TOO_LONG),
-				 errmsg("replication slot name \"%s\" is too long",
-						name)));
-		return false;
+		err_code = ERRCODE_NAME_TOO_LONG;
+		err_msg = psprintf(_("replication slot name \"%s\" is too long"), name);
+		goto error;
 	}
 
 	for (cp = name; *cp; cp++)
@@ -298,28 +302,38 @@ ReplicationSlotValidateName(const char *name, bool allow_reserved_name,
 			  || (*cp >= '0' && *cp <= '9')
 			  || (*cp == '_')))
 		{
-			ereport(elevel,
-					(errcode(ERRCODE_INVALID_NAME),
-					 errmsg("replication slot name \"%s\" contains invalid character",
-							name),
-					 errhint("Replication slot names may only contain lower case letters, numbers, and the underscore character.")));
-			return false;
+			err_code = ERRCODE_INVALID_NAME;
+			err_msg = psprintf(_("replication slot name \"%s\" contains invalid character"), name);
+			err_hint = psprintf(_("Replication slot names may only contain lower case letters, numbers, and the underscore character."));
+			goto error;
 		}
 	}
 
 	if (!allow_reserved_name && IsSlotForConflictCheck(name))
 	{
-		ereport(elevel,
-				errcode(ERRCODE_RESERVED_NAME),
-				errmsg("replication slot name \"%s\" is reserved",
-					   name),
-				errdetail("The name \"%s\" is reserved for the conflict detection slot.",
-						  CONFLICT_DETECTION_SLOT));
-
-		return false;
+		err_code = ERRCODE_RESERVED_NAME;
+		err_msg = psprintf(_("replication slot name \"%s\" is reserved"), name);
+		err_hint = psprintf(_("The name \"%s\" is reserved for the conflict detection slot."),
+							CONFLICT_DETECTION_SLOT);
+		goto error;
 	}
 
 	return true;
+
+error:
+	if (elevel == 0)
+	{
+		GUC_check_errdetail("%s", err_msg);
+		if (err_hint != NULL)
+			GUC_check_errhint("%s", err_hint);
+	}
+	else
+		ereport(elevel,
+				(errcode(err_code),
+				 errmsg("%s", err_msg),
+				 (err_hint != NULL) ? errhint("%s", err_hint) : 0));
+
+	return false;
 }
 
 /*
