@@ -96,6 +96,13 @@ pgstat_report_replslot(ReplicationSlot *slot, const PgStat_StatReplSlotEntry *re
 	REPLSLOT_ACC(stream_bytes);
 	REPLSLOT_ACC(total_txns);
 	REPLSLOT_ACC(total_bytes);
+	statent->plugin_has_stats = repSlotStat->plugin_has_stats;
+	if (repSlotStat->plugin_has_stats)
+	{
+		REPLSLOT_ACC(sent_txns);
+		REPLSLOT_ACC(sent_bytes);
+		REPLSLOT_ACC(filtered_bytes);
+	}
 #undef REPLSLOT_ACC
 
 	pgstat_unlock_entry(entry_ref);

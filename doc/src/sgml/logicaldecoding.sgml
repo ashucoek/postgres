@@ -938,6 +938,33 @@ typedef struct OutputPluginOptions
       needs to have a state, it can
       use <literal>ctx-&gt;output_plugin_private</literal> to store it.
      </para>
+
+     <para>
+      The startup callback may initialize <literal>ctx-&gt;stats</literal>,
+      typically as follows, if it chooses to maintain and report statistics
+      about its activity in <structname>pg_stat_replication_slots</structname>.
+<programlisting>
+ctx->stats = palloc0(sizeof(OutputPluginStats));
+</programlisting>
+      where <literal>OutputPluginStats</literal> is defined as follows:
+<programlisting>
+typedef struct OutputPluginStats
+{
+      int64   sentTxns;
+      int64   sentBytes;
+      int64   filteredBytes;
+} OutputPluginStats;
+</programlisting>
+      <literal>sentTxns</literal> is the number of transactions sent downstream
+      by the output plugin. <literal>sentBytes</literal> is the amount of data
+      sent downstream by the output plugin.
+      <function>OutputPluginWrite</function> is expected to update this counter
+      if <literal>ctx-&gt;stats</literal> is initialized by the output plugin.
+      <literal>filteredBytes</literal> is the size of changes in bytes that are
+      filtered out by the output plugin. Function
+      <literal>ReorderBufferChangeSize</literal> may be used to find the size of
+      filtered <literal>ReorderBufferChange</literal>.
+     </para>
     </sect3>
 
     <sect3 id="logicaldecoding-output-plugin-shutdown">

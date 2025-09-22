@@ -52,6 +52,7 @@ typedef struct LogicalDecodingContext
 
 	OutputPluginCallbacks callbacks;
 	OutputPluginOptions options;
+	OutputPluginStats *stats;
 
 	/*
 	 * User specified options

@@ -37,12 +37,17 @@ SELECT pg_stat_force_next_flush();
  
 (1 row)
 
-SELECT slot_name, spill_txns = 0 AS spill_txns, spill_count = 0 AS spill_count, total_txns > 0 AS total_txns, total_bytes > 0 AS total_bytes FROM pg_stat_replication_slots ORDER BY slot_name;
-       slot_name        | spill_txns | spill_count | total_txns | total_bytes 
-------------------------+------------+-------------+------------+-------------
- regression_slot_stats1 | t          | t           | t          | t
- regression_slot_stats2 | t          | t           | t          | t
- regression_slot_stats3 | t          | t           | t          | t
+-- total_txns may vary based on the background activity but sent_txns should
+-- always be 1 since the background transactions are always skipped. Filtered
+-- bytes would be set only when there's a change that was passed to the plugin
+-- but was filtered out. Depending upon the background transactions, filtered
+-- bytes may or may not be zero.
+SELECT slot_name, spill_txns = 0 AS spill_txns, spill_count = 0 AS spill_count, total_txns > 0 AS total_txns, total_bytes > 0 AS total_bytes, plugin_sent_txns, plugin_sent_bytes > 0 AS sent_bytes, plugin_filtered_bytes >= 0 AS filtered_bytes FROM pg_stat_replication_slots ORDER BY slot_name;
+       slot_name        | spill_txns | spill_count | total_txns | total_bytes | plugin_sent_txns | sent_bytes | filtered_bytes 
+------------------------+------------+-------------+------------+-------------+------------------+------------+----------------
+ regression_slot_stats1 | t          | t           | t          | t           |                1 | t          | t
+ regression_slot_stats2 | t          | t           | t          | t           |                1 | t          | t
+ regression_slot_stats3 | t          | t           | t          | t           |                1 | t          | t
 (3 rows)
 
 RESET logical_decoding_work_mem;
@@ -53,12 +58,12 @@ SELECT pg_stat_reset_replication_slot('regression_slot_stats1');
  
 (1 row)
 
-SELECT slot_name, spill_txns = 0 AS spill_txns, spill_count = 0 AS spill_count, total_txns > 0 AS total_txns, total_bytes > 0 AS total_bytes FROM pg_stat_replication_slots ORDER BY slot_name;
-       slot_name        | spill_txns | spill_count | total_txns | total_bytes 
-------------------------+------------+-------------+------------+-------------
- regression_slot_stats1 | t          | t           | f          | f
- regression_slot_stats2 | t          | t           | t          | t
- regression_slot_stats3 | t          | t           | t          | t
+SELECT slot_name, spill_txns = 0 AS spill_txns, spill_count = 0 AS spill_count, total_txns > 0 AS total_txns, total_bytes > 0 AS total_bytes, plugin_sent_txns, plugin_sent_bytes > 0 AS sent_bytes, plugin_filtered_bytes >= 0 AS filtered_bytes FROM pg_stat_replication_slots ORDER BY slot_name;
+       slot_name        | spill_txns | spill_count | total_txns | total_bytes | plugin_sent_txns | sent_bytes | filtered_bytes 
+------------------------+------------+-------------+------------+-------------+------------------+------------+----------------
+ regression_slot_stats1 | t          | t           | f          | f           |                  |            | 
+ regression_slot_stats2 | t          | t           | t          | t           |                1 | t          | t
+ regression_slot_stats3 | t          | t           | t          | t           |                1 | t          | t
 (3 rows)
 
 -- reset stats for all slots
@@ -68,27 +73,27 @@ SELECT pg_stat_reset_replication_slot(NULL);
  
 (1 row)
 
-SELECT slot_name, spill_txns = 0 AS spill_txns, spill_count = 0 AS spill_count, total_txns > 0 AS total_txns, total_bytes > 0 AS total_bytes FROM pg_stat_replication_slots ORDER BY slot_name;
-       slot_name        | spill_txns | spill_count | total_txns | total_bytes 
-------------------------+------------+-------------+------------+-------------
- regression_slot_stats1 | t          | t           | f          | f
- regression_slot_stats2 | t          | t           | f          | f
- regression_slot_stats3 | t          | t           | f          | f
+SELECT slot_name, spill_txns = 0 AS spill_txns, spill_count = 0 AS spill_count, total_txns > 0 AS total_txns, total_bytes > 0 AS total_bytes, plugin_sent_txns, plugin_sent_bytes, plugin_filtered_bytes FROM pg_stat_replication_slots ORDER BY slot_name;
+       slot_name        | spill_txns | spill_count | total_txns | total_bytes | plugin_sent_txns | plugin_sent_bytes | plugin_filtered_bytes 
+------------------------+------------+-------------+------------+-------------+------------------+-------------------+-----------------------
+ regression_slot_stats1 | t          | t           | f          | f           |                  |                   |                      
+ regression_slot_stats2 | t          | t           | f          | f           |                  |                   |                      
+ regression_slot_stats3 | t          | t           | f          | f           |                  |                   |                      
 (3 rows)
 
 -- verify accessing/resetting stats for non-existent slot does something reasonable
 SELECT * FROM pg_stat_get_replication_slot('do-not-exist');
-  slot_name   | spill_txns | spill_count | spill_bytes | stream_txns | stream_count | stream_bytes | total_txns | total_bytes | stats_reset 
---------------+------------+-------------+-------------+-------------+--------------+--------------+------------+-------------+-------------
- do-not-exist |          0 |           0 |           0 |           0 |            0 |            0 |          0 |           0 | 
+  slot_name   | spill_txns | spill_count | spill_bytes | stream_txns | stream_count | stream_bytes | total_txns | total_bytes | plugin_filtered_bytes | plugin_sent_txns | plugin_sent_bytes | stats_reset 
+--------------+------------+-------------+-------------+-------------+--------------+--------------+------------+-------------+-----------------------+------------------+-------------------+-------------
+ do-not-exist |          0 |           0 |           0 |           0 |            0 |            0 |          0 |           0 |                       |                  |                   | 
 (1 row)
 
 SELECT pg_stat_reset_replication_slot('do-not-exist');
 ERROR:  replication slot "do-not-exist" does not exist
 SELECT * FROM pg_stat_get_replication_slot('do-not-exist');
-  slot_name   | spill_txns | spill_count | spill_bytes | stream_txns | stream_count | stream_bytes | total_txns | total_bytes | stats_reset 
---------------+------------+-------------+-------------+-------------+--------------+--------------+------------+-------------+-------------
- do-not-exist |          0 |           0 |           0 |           0 |            0 |            0 |          0 |           0 | 
+  slot_name   | spill_txns | spill_count | spill_bytes | stream_txns | stream_count | stream_bytes | total_txns | total_bytes | plugin_filtered_bytes | plugin_sent_txns | plugin_sent_bytes | stats_reset 
+--------------+------------+-------------+-------------+-------------+--------------+--------------+------------+-------------+-----------------------+------------------+-------------------+-------------
+ do-not-exist |          0 |           0 |           0 |           0 |            0 |            0 |          0 |           0 |                       |                  |                   | 
 (1 row)
 
 -- spilling the xact
@@ -121,20 +126,20 @@ SELECT slot_name, spill_txns > 0 AS spill_txns, spill_count > 0 AS spill_count F
 -- Ensure stats can be repeatedly accessed using the same stats snapshot. See
 -- https://postgr.es/m/20210317230447.c7uc4g3vbs4wi32i%40alap3.anarazel.de
 BEGIN;
-SELECT slot_name FROM pg_stat_replication_slots;
-       slot_name        
-------------------------
- regression_slot_stats1
- regression_slot_stats2
- regression_slot_stats3
+SELECT slot_name, plugin FROM pg_stat_replication_slots;
+       slot_name        |    plugin     
+------------------------+---------------
+ regression_slot_stats1 | test_decoding
+ regression_slot_stats2 | test_decoding
+ regression_slot_stats3 | test_decoding
 (3 rows)
 
-SELECT slot_name FROM pg_stat_replication_slots;
-       slot_name        
-------------------------
- regression_slot_stats1
- regression_slot_stats2
- regression_slot_stats3
+SELECT slot_name, plugin FROM pg_stat_replication_slots;
+       slot_name        |    plugin     
+------------------------+---------------
+ regression_slot_stats1 | test_decoding
+ regression_slot_stats2 | test_decoding
+ regression_slot_stats3 | test_decoding
 (3 rows)
 
 COMMIT;

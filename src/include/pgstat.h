@@ -395,6 +395,10 @@ typedef struct PgStat_StatReplSlotEntry
 	PgStat_Counter stream_bytes;
 	PgStat_Counter total_txns;
 	PgStat_Counter total_bytes;
+	bool		plugin_has_stats;
+	PgStat_Counter sent_txns;
+	PgStat_Counter sent_bytes;
+	PgStat_Counter filtered_bytes;
 	TimestampTz stat_reset_timestamp;
 } PgStat_StatReplSlotEntry;
 

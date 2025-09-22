@@ -23,10 +23,16 @@ sub test_slot_stats
 
 	my ($node, $expected, $msg) = @_;
 
+	# If there are background transactions which are filtered out by the output
+	# plugin, plugin_filtered_bytes may be greater than 0. But it's not
+	# guaranteed that such transactions would be present.
 	my $result = $node->safe_psql(
 		'postgres', qq[
 		SELECT slot_name, total_txns > 0 AS total_txn,
-			   total_bytes > 0 AS total_bytes
+			   total_bytes > 0 AS total_bytes,
+			   plugin_sent_txns > 0 AS sent_txn,
+			   plugin_sent_bytes > 0 AS sent_bytes,
+			   plugin_filtered_bytes >= 0 AS filtered_bytes
 			   FROM pg_stat_replication_slots
 			   ORDER BY slot_name]);
 	is($result, $expected, $msg);
@@ -80,9 +86,9 @@ $node->start;
 # restart.
 test_slot_stats(
 	$node,
-	qq(regression_slot1|t|t
-regression_slot2|t|t
-regression_slot3|t|t),
+	qq(regression_slot1|t|t|t|t|t
+regression_slot2|t|t|t|t|t
+regression_slot3|t|t|t|t|t),
 	'check replication statistics are updated');
 
 # Test to remove one of the replication slots and adjust
@@ -104,8 +110,8 @@ $node->start;
 # restart.
 test_slot_stats(
 	$node,
-	qq(regression_slot1|t|t
-regression_slot2|t|t),
+	qq(regression_slot1|t|t|t|t|t
+regression_slot2|t|t|t|t|t),
 	'check replication statistics after removing the slot file');
 
 # cleanup

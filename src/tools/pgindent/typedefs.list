@@ -1830,6 +1830,7 @@ OuterJoinClauseInfo
 OutputPluginCallbacks
 OutputPluginOptions
 OutputPluginOutputType
+OutputPluginStats
 OverridingKind
 PACE_HEADER
 PACL

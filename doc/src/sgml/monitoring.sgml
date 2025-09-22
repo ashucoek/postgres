@@ -1547,6 +1547,17 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>plugin</structfield> <type>text</type>
+       </para>
+       <para>
+        The base name of the shared object containing the output plugin this
+        logical slot is using. This column is same as the one in
+        <structname>pg_replication_slots</structname>.
+      </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
         <structfield>spill_txns</structfield> <type>bigint</type>
        </para>
        <para>
@@ -1640,6 +1651,53 @@ description | Waiting for a newly initialized WAL file to reach durable storage
         Amount of transaction data decoded for sending transactions to the
         decoding output plugin while decoding changes from WAL for this slot.
         Note that this includes data that is streamed and/or spilled.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>plugin_filtered_bytes</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Amount of changes, from <structfield>total_bytes</structfield>, filtered
+        out by the output plugin and not sent downstream. Please note that it
+        does not include the changes filtered before a change is handed over to
+        the output plugin, e.g. the changes filtered by origin. The count is
+        maintained by the output plugin mentioned in
+        <structfield>plugin</structfield>. It is NULL when statistics is not
+        initialized or immediately after a reset or when not maintained by the
+        output plugin.
+       </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>plugin_sent_txns</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of decoded transactions sent downstream for this slot. This
+        counts top-level transactions only, and is not incremented for
+        subtransactions. These transactions are subset of transctions sent to
+        the decoding plugin. Hence this count is expected to be lesser than or
+        equal to <structfield>total_txns</structfield>.  The count is maintained
+        by the output plugin mentioned in <structfield>plugin</structfield>.  It
+        is NULL when statistics is not initialized or immediately after a reset or
+        when not maintained by the output plugin.
+       </para></entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>plugin_sent_bytes</structfield><type>bigint</type>
+       </para>
+       <para>
+        Amount of transaction changes sent downstream for this slot by the
+        output plugin after applying filtering and converting into its output
+        format. The count is maintained by the output plugin mentioned in
+        <structfield>plugin</structfield>.  It is NULL when statistics is not
+        initialized or immediately after a reset or when not maintained by the
+        output plugin.
        </para>
       </entry>
      </row>

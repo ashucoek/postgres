@@ -30,6 +30,19 @@ typedef struct OutputPluginOptions
 } OutputPluginOptions;
 
 /*
+ * Statistics about the transactions decoded and sent downstream by the output
+ * plugin.
+ */
+typedef struct OutputPluginStats
+{
+	int64		sentTxns;		/* number of transactions decoded and sent
+								 * downstream */
+	int64		sentBytes;		/* amount of data decoded and sent downstream */
+	int64		filteredBytes;	/* amount of data from reoder buffer that was
+								 * filtered out by the output plugin */
+} OutputPluginStats;
+
+/*
  * Type of the shared library symbol _PG_output_plugin_init that is looked up
  * when loading an output plugin shared library.
  */

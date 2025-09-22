@@ -450,6 +450,7 @@ pgoutput_startup(LogicalDecodingContext *ctx, OutputPluginOptions *opt,
 										 ALLOCSET_SMALL_SIZES);
 
 	ctx->output_plugin_private = data;
+	ctx->stats = palloc0(sizeof(OutputPluginStats));
 
 	/* This plugin uses binary protocol. */
 	opt->output_type = OUTPUT_PLUGIN_BINARY_OUTPUT;
@@ -591,6 +592,7 @@ pgoutput_send_begin(LogicalDecodingContext *ctx, ReorderBufferTXN *txn)
 	OutputPluginPrepareWrite(ctx, !send_replication_origin);
 	logicalrep_write_begin(ctx->out, txn);
 	txndata->sent_begin_txn = true;
+	ctx->stats->sentTxns++;
 
 	send_repl_origin(ctx, txn->origin_id, txn->origin_lsn,
 					 send_replication_origin);
@@ -1469,7 +1471,10 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	TupleTableSlot *new_slot = NULL;
 
 	if (!is_publishable_relation(relation))
+	{
+		ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
 		return;
+	}
 
 	/*
 	 * Remember the xid for the change in streaming mode. We need to send xid
@@ -1487,15 +1492,24 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	{
 		case REORDER_BUFFER_CHANGE_INSERT:
 			if (!relentry->pubactions.pubinsert)
+			{
+				ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
 				return;
+			}
 			break;
 		case REORDER_BUFFER_CHANGE_UPDATE:
 			if (!relentry->pubactions.pubupdate)
+			{
+				ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
 				return;
+			}
 			break;
 		case REORDER_BUFFER_CHANGE_DELETE:
 			if (!relentry->pubactions.pubdelete)
+			{
+				ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
 				return;
+			}
 
 			/*
 			 * This is only possible if deletes are allowed even when replica
@@ -1505,6 +1519,7 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 			if (!change->data.tp.oldtuple)
 			{
 				elog(DEBUG1, "didn't send DELETE change because of missing oldtuple");
+				ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
 				return;
 			}
 			break;
@@ -1560,7 +1575,10 @@ pgoutput_change(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 	 * of the row filter for old and new tuple.
 	 */
 	if (!pgoutput_row_filter(targetrel, old_slot, &new_slot, relentry, &action))
+	{
+		ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
 		goto cleanup;
+	}
 
 	/*
 	 * Send BEGIN if we haven't yet.
@@ -1688,6 +1706,9 @@ pgoutput_truncate(LogicalDecodingContext *ctx, ReorderBufferTXN *txn,
 								  change->data.truncate.restart_seqs);
 		OutputPluginWrite(ctx, true);
 	}
+	else
+		ctx->stats->filteredBytes += ReorderBufferChangeSize(change);
+
 
 	MemoryContextSwitchTo(old);
 	MemoryContextReset(data->context);

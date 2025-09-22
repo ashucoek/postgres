@@ -1053,6 +1053,7 @@ CREATE VIEW pg_replication_slots AS
 CREATE VIEW pg_stat_replication_slots AS
     SELECT
             s.slot_name,
+            r.plugin,
             s.spill_txns,
             s.spill_count,
             s.spill_bytes,
@@ -1061,6 +1062,9 @@ CREATE VIEW pg_stat_replication_slots AS
             s.stream_bytes,
             s.total_txns,
             s.total_bytes,
+            s.plugin_filtered_bytes,
+            s.plugin_sent_txns,
+            s.plugin_sent_bytes,
             s.stats_reset
     FROM pg_replication_slots as r,
         LATERAL pg_stat_get_replication_slot(slot_name) as s

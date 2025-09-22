@@ -89,6 +89,13 @@ LogicalOutputWrite(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xi
 	values[2] = PointerGetDatum(cstring_to_text_with_len(ctx->out->data, ctx->out->len));
 
 	tuplestore_putvalues(p->tupstore, p->tupdesc, values, nulls);
+
+	/*
+	 * If output plugin has chosen to maintain its stats, update the amount of
+	 * data sent downstream.
+	 */
+	if (ctx->stats)
+		ctx->stats->sentBytes += ctx->out->len + sizeof(XLogRecPtr) + sizeof(TransactionId);
 	p->returned_rows++;
 }
 

@@ -1952,13 +1952,14 @@ void
 UpdateDecodingStats(LogicalDecodingContext *ctx)
 {
 	ReorderBuffer *rb = ctx->reorder;
+	OutputPluginStats *stats = ctx->stats;
 	PgStat_StatReplSlotEntry repSlotStat;
 
 	/* Nothing to do if we don't have any replication stats to be sent. */
 	if (rb->spillBytes <= 0 && rb->streamBytes <= 0 && rb->totalBytes <= 0)
 		return;
 
-	elog(DEBUG2, "UpdateDecodingStats: updating stats %p %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64,
+	elog(DEBUG2, "UpdateDecodingStats: updating stats %p %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " (%s) %" PRId64 " %" PRId64 " %" PRId64,
 		 rb,
 		 rb->spillTxns,
 		 rb->spillCount,
@@ -1967,7 +1968,11 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 		 rb->streamCount,
 		 rb->streamBytes,
 		 rb->totalTxns,
-		 rb->totalBytes);
+		 rb->totalBytes,
+		 stats ? "plugin has stats" : "plugin has no stats",
+		 stats ? stats->sentTxns : 0,
+		 stats ? stats->sentBytes : 0,
+		 stats ? stats->filteredBytes : 0);
 
 	repSlotStat.spill_txns = rb->spillTxns;
 	repSlotStat.spill_count = rb->spillCount;
@@ -1977,6 +1982,15 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 	repSlotStat.stream_bytes = rb->streamBytes;
 	repSlotStat.total_txns = rb->totalTxns;
 	repSlotStat.total_bytes = rb->totalBytes;
+	if (stats)
+	{
+		repSlotStat.plugin_has_stats = true;
+		repSlotStat.sent_txns = stats->sentTxns;
+		repSlotStat.sent_bytes = stats->sentBytes;
+		repSlotStat.filtered_bytes = stats->filteredBytes;
+	}
+	else
+		repSlotStat.plugin_has_stats = false;
 
 	pgstat_report_replslot(ctx->slot, &repSlotStat);
 
@@ -1988,6 +2002,12 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 	rb->streamBytes = 0;
 	rb->totalTxns = 0;
 	rb->totalBytes = 0;
+	if (stats)
+	{
+		stats->sentTxns = 0;
+		stats->sentBytes = 0;
+		stats->filteredBytes = 0;
+	}
 }
 
 /*
