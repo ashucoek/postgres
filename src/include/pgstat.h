@@ -17,6 +17,7 @@
 #include "postmaster/pgarch.h"	/* for MAX_XFN_CHARS */
 #include "replication/conflict.h"
 #include "replication/worker_internal.h"
+#include "storage/lock.h"
 #include "utils/backend_progress.h" /* for backward compatibility */	/* IWYU pragma: export */
 #include "utils/backend_status.h"	/* for backward compatibility */	/* IWYU pragma: export */
 #include "utils/pgstat_kind.h"
@@ -342,6 +343,27 @@ typedef struct PgStat_IO
 	PgStat_BktypeIO stats[BACKEND_NUM_TYPES];
 } PgStat_IO;
 
+typedef struct PgStat_LockEntry
+{
+	PgStat_Counter requests;
+	PgStat_Counter waits;
+	PgStat_Counter timeouts;
+	PgStat_Counter deadlock_timeouts;
+	PgStat_Counter deadlocks;
+	PgStat_Counter fastpath;
+} PgStat_LockEntry;
+
+typedef struct PgStat_PendingLock
+{
+	PgStat_LockEntry stats[LOCKTAG_LAST_TYPE + 1];
+} PgStat_PendingLock;
+
+typedef struct PgStat_Lock
+{
+	TimestampTz stat_reset_timestamp;
+	PgStat_LockEntry stats[LOCKTAG_LAST_TYPE + 1];
+} PgStat_Lock;
+
 typedef struct PgStat_StatDBEntry
 {
 	PgStat_Counter xact_commit;
@@ -613,6 +635,18 @@ extern bool pgstat_tracks_io_object(BackendType bktype,
 extern bool pgstat_tracks_io_op(BackendType bktype, IOObject io_object,
 								IOContext io_context, IOOp io_op);
 
+
+/*
+ * Functions in pgstat_lock.c
+ */
+
+extern void pgstat_lock_flush(bool nowait);
+extern void pgstat_count_lock_requests(uint8 locktag_type);
+extern void pgstat_count_lock_waits(uint8 locktag_type);
+extern void pgstat_count_lock_timeouts(uint8 locktag_type);
+extern void pgstat_count_lock_deadlock_timeouts(uint8 locktag_type);
+extern void pgstat_count_lock_deadlocks(uint8 locktag_type);
+extern void pgstat_count_lock_fastpath(uint8 locktag_type);
 
 /*
  * Functions in pgstat_database.c

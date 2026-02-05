@@ -3417,6 +3417,14 @@ ProcessInterrupts(void)
 
 		if (lock_timeout_occurred)
 		{
+			LOCALLOCK  *lockAwaited;
+
+			lockAwaited = GetAwaitedLock();
+
+			/* Increment the lock statistics timeouts counter */
+			if (lockAwaited)
+				pgstat_count_lock_timeouts(lockAwaited->tag.lock.locktag_type);
+
 			LockErrorCleanup();
 			ereport(ERROR,
 					(errcode(ERRCODE_LOCK_NOT_AVAILABLE),
