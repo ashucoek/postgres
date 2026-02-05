@@ -647,6 +647,7 @@ extern void pgstat_count_lock_timeouts(uint8 locktag_type);
 extern void pgstat_count_lock_deadlock_timeouts(uint8 locktag_type);
 extern void pgstat_count_lock_deadlocks(uint8 locktag_type);
 extern void pgstat_count_lock_fastpath(uint8 locktag_type);
+extern PgStat_Lock *pgstat_fetch_stat_lock(void);
 
 /*
  * Functions in pgstat_database.c
