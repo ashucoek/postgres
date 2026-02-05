@@ -1461,9 +1461,12 @@ ProcSleep(LOCALLOCK *locallock)
 			/* check for deadlocks first, as that's probably log-worthy */
 			if (got_deadlock_timeout)
 			{
+				/* Increment the lock statistics deadlock_timeouts counter */
+				pgstat_count_lock_deadlock_timeouts(locallock->tag.lock.locktag_type);
 				CheckDeadLock();
 				got_deadlock_timeout = false;
 			}
+
 			CHECK_FOR_INTERRUPTS();
 		}
 

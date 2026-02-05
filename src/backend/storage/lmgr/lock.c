@@ -45,6 +45,7 @@
 #include "storage/spin.h"
 #include "storage/standby.h"
 #include "utils/memutils.h"
+#include "utils/pgstat_internal.h"
 #include "utils/ps_status.h"
 #include "utils/resowner.h"
 
@@ -871,6 +872,9 @@ LockAcquireExtended(const LOCKTAG *locktag,
 						lockMethodTable->lockModeNames[lockmode]),
 				 errhint("Only RowExclusiveLock or less can be acquired on database objects during recovery.")));
 
+	/* Increment the lock statistics requests counter */
+	pgstat_count_lock_requests(locktag->locktag_type);
+
 #ifdef LOCK_DEBUG
 	if (LOCK_DEBUG_ENABLED(locktag))
 		elog(LOG, "LockAcquire: lock [%u,%u] %s",
@@ -1202,6 +1206,8 @@ LockAcquireExtended(const LOCKTAG *locktag,
 		}
 		else
 		{
+			/* Increment the lock statistics deadlocks counter */
+			pgstat_count_lock_deadlocks(locallock->tag.lock.locktag_type);
 			DeadLockReport();
 			/* DeadLockReport() will not return */
 		}
@@ -1213,6 +1219,8 @@ LockAcquireExtended(const LOCKTAG *locktag,
 	 */
 	if (waitResult == PROC_WAIT_STATUS_WAITING)
 	{
+		/* Increment the lock statistics waits counter */
+		pgstat_count_lock_waits(locktag->locktag_type);
 		Assert(!dontWait);
 		PROCLOCK_PRINT("LockAcquire: sleeping on lock", proclock);
 		LOCK_PRINT("LockAcquire: sleeping on lock", lock, lockmode);
@@ -1233,6 +1241,8 @@ LockAcquireExtended(const LOCKTAG *locktag,
 			 * now.
 			 */
 			Assert(!dontWait);
+			/* Increment the lock statistics deadlocks counter */
+			pgstat_count_lock_deadlocks(locallock->tag.lock.locktag_type);
 			DeadLockReport();
 			/* DeadLockReport() will not return */
 		}
@@ -2799,6 +2809,8 @@ FastPathGrantRelationLock(Oid relid, LOCKMODE lockmode)
 		{
 			Assert(!FAST_PATH_CHECK_LOCKMODE(MyProc, f, lockmode));
 			FAST_PATH_SET_LOCKMODE(MyProc, f, lockmode);
+			/* Increment the lock statistics fastpath counter */
+			pgstat_count_lock_fastpath(LOCKTAG_RELATION);
 			return true;
 		}
 	}
@@ -2808,6 +2820,8 @@ FastPathGrantRelationLock(Oid relid, LOCKMODE lockmode)
 	{
 		MyProc->fpRelId[unused_slot] = relid;
 		FAST_PATH_SET_LOCKMODE(MyProc, unused_slot, lockmode);
+		/* Increment the lock statistics fastpath counter */
+		pgstat_count_lock_fastpath(LOCKTAG_RELATION);
 		++FastPathLocalUseCounts[group];
 		return true;
 	}
@@ -4629,6 +4643,10 @@ VirtualXactLockTableInsert(VirtualTransactionId vxid)
 
 	MyProc->fpVXIDLock = true;
 	MyProc->fpLocalTransactionId = vxid.localTransactionId;
+
+	/* Increment the lock statistics requests and fastpath counters */
+	pgstat_count_lock_requests(LOCKTAG_VIRTUALTRANSACTION);
+	pgstat_count_lock_fastpath(LOCKTAG_VIRTUALTRANSACTION);
 
 	LWLockRelease(&MyProc->fpInfoLock);
 }
