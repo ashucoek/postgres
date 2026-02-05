@@ -1,6 +1,12 @@
 Parsed test spec with 8 sessions
 
-starting permutation: s1a1 s2a2 s3a3 s4a4 s5a5 s6a6 s7a7 s8a8 s1a2 s2a3 s3a4 s4a5 s5a6 s6a7 s7a8 s8a1 s8c s7c s6c s5c s4c s3c s2c s1c
+starting permutation: s1rl s1a1 s2a2 s3a3 s4a4 s5a5 s6a6 s7a7 s8a8 s1a2 s2a3 s3a4 s4a5 s5a6 s6a7 s7a8 s8a1 s8c s8f s7c s6c s5c s4c s3c s2c s1c s1sl
+step s1rl: SELECT pg_stat_reset_shared('lock');
+pg_stat_reset_shared
+--------------------
+                    
+(1 row)
+
 step s1a1: LOCK TABLE a1;
 step s2a2: LOCK TABLE a2;
 step s3a3: LOCK TABLE a3;
@@ -21,6 +27,12 @@ step s8a1: <... completed>
 ERROR:  deadlock detected
 step s7a8: <... completed>
 step s8c: COMMIT;
+step s8f: SELECT pg_stat_force_next_flush();
+pg_stat_force_next_flush
+------------------------
+                        
+(1 row)
+
 step s7c: COMMIT;
 step s6a7: <... completed>
 step s6c: COMMIT;
@@ -34,3 +46,9 @@ step s2a3: <... completed>
 step s2c: COMMIT;
 step s1a2: <... completed>
 step s1c: COMMIT;
+step s1sl: SELECT deadlocks > 0, deadlock_timeouts > 0 FROM pg_stat_lock WHERE locktype = 'relation';
+?column?|?column?
+--------+--------
+t       |t       
+(1 row)
+

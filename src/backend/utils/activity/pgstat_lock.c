@@ -21,6 +21,14 @@
 static PgStat_PendingLock PendingLockStats;
 static bool have_lockstats = false;
 
+PgStat_Lock *
+pgstat_fetch_stat_lock(void)
+{
+	pgstat_snapshot_fixed(PGSTAT_KIND_LOCK);
+
+	return &pgStatLocal.snapshot.lock;
+}
+
 /*
  * Simpler wrapper of pgstat_lock_flush_cb()
  */
