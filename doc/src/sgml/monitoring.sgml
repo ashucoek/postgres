@@ -494,6 +494,15 @@ postgres   27093  0.0  0.0  30096  2752 ?        Ss   11:34   0:00 postgres: ser
      </row>
 
      <row>
+      <entry><structname>pg_stat_lock</structname><indexterm><primary>pg_stat_lock</primary></indexterm></entry>
+      <entry>
+       One row for each lock type, containing cluster-wide locks statistics.
+       See <link linkend="monitoring-pg-stat-lock-view">
+       <structname>pg_stat_lock</structname></link> for details.
+     </entry>
+     </row>
+
+     <row>
       <entry><structname>pg_stat_replication_slots</structname><indexterm><primary>pg_stat_replication_slots</primary></indexterm></entry>
       <entry>One row per replication slot, showing statistics about the
        replication slot's usage. See
@@ -3124,6 +3133,142 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
  </sect2>
 
+
+ <sect2 id="monitoring-pg-stat-lock-view">
+  <title><structname>pg_stat_lock</structname></title>
+
+  <indexterm>
+   <primary>pg_stat_lock</primary>
+  </indexterm>
+
+  <para>
+   The <structname>pg_stat_lock</structname> view will contain one row for each
+   lock type, showing cluster-wide locks statistics.
+  </para>
+
+  <table id="pg-stat-lock-view" xreflabel="pg_stat_lock">
+   <title><structname>pg_stat_lock</structname> View</title>
+   <tgroup cols="1">
+    <thead>
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        Column Type
+       </para>
+       <para>
+        Description
+       </para>
+      </entry>
+     </row>
+    </thead>
+    <tbody>
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>locktype</structfield> <type>text</type>
+       </para>
+       <para>
+        Type of the lockable object:
+        <literal>relation</literal>,
+        <literal>extend</literal>,
+        <literal>frozenid</literal>,
+        <literal>page</literal>,
+        <literal>tuple</literal>,
+        <literal>transactionid</literal>,
+        <literal>virtualxid</literal>,
+        <literal>spectoken</literal>,
+        <literal>object</literal>,
+        <literal>userlock</literal>,
+        <literal>advisory</literal>, or
+        <literal>applytransaction</literal>.
+        (See also <xref linkend="wait-event-lock-table"/>.)
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>requests</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of requests for this lock type.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>waits</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times requests for this lock type had to wait.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>timeouts</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times requests for this lock type had to wait longer
+        than <varname>lock_timeout</varname>.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>deadlock_timeouts</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times requests for this lock type had to wait longer
+        than <varname>deadlock_timeout</varname>.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>deadlocks</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times a deadlock occurred on this lock type.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>fastpath</structfield> <type>bigint</type>
+       </para>
+       <para>
+        Number of times this lock type was taken via fast path.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry">
+       <para role="column_definition">
+        <structfield>stats_reset</structfield> <type>timestamp with time zone</type>
+       </para>
+       <para>
+        Time at which these statistics were last reset.
+       </para>
+      </entry>
+     </row>
+    </tbody>
+   </tgroup>
+  </table>
+ </sect2>
+
  <sect2 id="monitoring-pg-stat-bgwriter-view">
   <title><structname>pg_stat_bgwriter</structname></title>
 
@@ -5193,6 +5338,12 @@ description | Waiting for a newly initialized WAL file to reach durable storage
          <para>
           <literal>io</literal>: Reset all the counters shown in the
           <structname>pg_stat_io</structname> view.
+         </para>
+        </listitem>
+        <listitem>
+         <para>
+          <literal>lock</literal>: Reset all the counters shown in the
+          <structname>pg_stat_lock</structname> view.
          </para>
         </listitem>
         <listitem>
