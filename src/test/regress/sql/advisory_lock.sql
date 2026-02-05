@@ -4,6 +4,8 @@
 
 SELECT oid AS datoid FROM pg_database WHERE datname = current_database() \gset
 
+SELECT pg_stat_reset_shared('lock');
+
 BEGIN;
 
 SELECT
@@ -26,12 +28,14 @@ SELECT
 	pg_advisory_unlock(1), pg_advisory_unlock_shared(2),
 	pg_advisory_unlock(1, 1), pg_advisory_unlock_shared(2, 2);
 
+SELECT pg_stat_force_next_flush();
 
 -- automatically release xact locks at commit
 COMMIT;
 
 SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND database = :datoid;
 
+SELECT requests FROM pg_stat_lock WHERE locktype = 'advisory';
 
 BEGIN;
 
