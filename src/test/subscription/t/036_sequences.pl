@@ -75,8 +75,7 @@ is($result, '100|t',
 
 ##########
 ## ALTER SUBSCRIPTION ... REFRESH PUBLICATION should cause sync of new
-# sequences of the publisher, but changes to existing sequences should
-# not be synced.
+# sequences of the publisher.
 ##########
 
 # Create a new sequence 'regress_s2', and update existing sequence 'regress_s1'
@@ -97,19 +96,6 @@ $result = $node_subscriber->safe_psql(
 $node_subscriber->poll_query_until('postgres', $synced_query)
   or die "Timed out while waiting for subscriber to synchronize data";
 
-$result = $node_publisher->safe_psql(
-	'postgres', qq(
-	SELECT last_value, is_called FROM regress_s1;
-));
-is($result, '200|t', 'Check sequence value in the publisher');
-
-# Check - existing sequence ('regress_s1') is not synced
-$result = $node_subscriber->safe_psql(
-	'postgres', qq(
-	SELECT last_value, is_called FROM regress_s1;
-));
-is($result, '100|t', 'REFRESH PUBLICATION will not sync existing sequence');
-
 # Check - newly published sequence ('regress_s2') is synced
 $result = $node_subscriber->safe_psql(
 	'postgres', qq(
@@ -119,12 +105,9 @@ is($result, '100|t',
 	'REFRESH PUBLICATION will sync newly published sequence');
 
 ##########
-# Test: REFRESH SEQUENCES and REFRESH PUBLICATION (copy_data = false)
-#
-# 1. ALTER SUBSCRIPTION ... REFRESH SEQUENCES should re-synchronize all
-#    existing sequences, but not synchronize newly added ones.
-# 2. ALTER SUBSCRIPTION ... REFRESH PUBLICATION with (copy_data = false) should
-#    also not update sequence values for newly added sequences.
+# Test:
+# 1. Automatic update of existing sequence values
+# 2. Newly added sequences are not automatically updated.
 ##########
 
 # Create a new sequence 'regress_s3', and update the existing sequence
@@ -138,25 +121,17 @@ $node_publisher->safe_psql(
 	INSERT INTO regress_seq_test SELECT nextval('regress_s2') FROM generate_series(1,100);
 ));
 
-# 1. Do ALTER SUBSCRIPTION ... REFRESH SEQUENCES
-$result = $node_subscriber->safe_psql(
-	'postgres', qq(
-	ALTER SUBSCRIPTION regress_seq_sub REFRESH SEQUENCES;
-));
-$node_subscriber->poll_query_until('postgres', $synced_query)
-  or die "Timed out while waiting for subscriber to synchronize data";
-
 # Check - existing sequences ('regress_s1' and 'regress_s2') are synced
-$result = $node_subscriber->safe_psql(
-	'postgres', qq(
-	SELECT last_value, is_called FROM regress_s1;
-));
-is($result, '200|t', 'REFRESH SEQUENCES will sync existing sequences');
-$result = $node_subscriber->safe_psql(
-	'postgres', qq(
-	SELECT last_value, is_called FROM regress_s2;
-));
-is($result, '200|t', 'REFRESH SEQUENCES will sync existing sequences');
+
+# Poll until regress_s1 reflects the updated sequence value
+$node_subscriber->poll_query_until('postgres',
+    qq(SELECT last_value = 200 AND is_called = 't' FROM regress_s1;))
+  or die "Timed out while waiting for regress_s1 sequence to sync";
+
+# Poll until regress_s2 reflects the updated sequence value
+$node_subscriber->poll_query_until('postgres',
+    qq(SELECT last_value = 200 AND is_called = 't' FROM regress_s2;))
+  or die "Timed out while waiting for regress_s2 sequence to sync";
 
 # Check - newly published sequence ('regress_s3') is not synced
 $result = $node_subscriber->safe_psql(
@@ -164,25 +139,7 @@ $result = $node_subscriber->safe_psql(
 	SELECT last_value, is_called FROM regress_s3;
 ));
 is($result, '1|f',
-	'REFRESH SEQUENCES will not sync newly published sequence');
-
-# 2. Do ALTER SUBSCRIPTION ... REFRESH PUBLICATION with copy_data as false
-$result = $node_subscriber->safe_psql(
-	'postgres', qq(
-	ALTER SUBSCRIPTION regress_seq_sub REFRESH PUBLICATION WITH (copy_data = false);
-));
-$node_subscriber->poll_query_until('postgres', $synced_query)
-  or die "Timed out while waiting for subscriber to synchronize data";
-
-# Check - newly published sequence ('regress_s3') is not synced with copy_data
-# as false.
-$result = $node_subscriber->safe_psql(
-	'postgres', qq(
-	SELECT last_value, is_called FROM regress_s3;
-));
-is($result, '1|f',
-	'REFRESH PUBLICATION will not sync newly published sequence with copy_data as false'
-);
+	'Newly published sequences are not synced automatically');
 
 ##########
 # ALTER SUBSCRIPTION ... REFRESH PUBLICATION should report an error when:

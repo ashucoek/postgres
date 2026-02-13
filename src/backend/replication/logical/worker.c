@@ -4219,6 +4219,9 @@ LogicalRepApplyLoop(XLogRecPtr last_received)
 			ProcessConfigFile(PGC_SIGHUP);
 		}
 
+		/* Check if any new sequences need syncing */
+		ProcessSequencesForSync();
+
 		if (rc & WL_TIMEOUT)
 		{
 			/*

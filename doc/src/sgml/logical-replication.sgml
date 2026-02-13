@@ -1775,20 +1775,14 @@ Publications:
       to synchronize only newly added sequences.
      </para>
     </listitem>
-    <listitem>
-     <para>
-      use <link linkend="sql-altersubscription-params-refresh-sequences">
-      <command>ALTER SUBSCRIPTION ... REFRESH SEQUENCES</command></link>
-      to re-synchronize all sequences currently known to the subscription.
-     </para>
-    </listitem>
    </itemizedlist>
   </para>
 
   <para>
    A <firstterm>sequence synchronization worker</firstterm> will be started
-   after executing any of the above subscriber commands, and will exit once the
-   sequences are synchronized.
+   after executing any of the above subscriber commands. The worker will
+   remain running for the life of the subscription, periodically
+   synchronizing all published sequences.
   </para>
   <para>
    The ability to launch a sequence synchronization worker is limited by the
@@ -1815,21 +1809,7 @@ Publications:
   </sect2>
 
   <sect2 id="sequences-out-of-sync">
-   <title>Refreshing Out-of-Sync Sequences</title>
-   <para>
-    Subscriber sequence values will become out of sync as the publisher
-    advances them.
-   </para>
-   <para>
-    To detect this, compare the
-    <link linkend="catalog-pg-subscription-rel">pg_subscription_rel</link>.<structfield>srsublsn</structfield>
-    on the subscriber with the <structfield>page_lsn</structfield> obtained
-    from the <link linkend="func-pg-get-sequence-data"><function>pg_get_sequence_data</function></link>
-    function for the sequence on the publisher. Then run
-    <link linkend="sql-altersubscription-params-refresh-sequences">
-    <command>ALTER SUBSCRIPTION ... REFRESH SEQUENCES</command></link> to
-    re-synchronize if necessary.
-   </para>
+   <title>Out-of-Sync Sequences</title>
    <warning>
     <para>
      Each sequence caches a block of values (typically 32) in memory before
@@ -1961,16 +1941,6 @@ Publications:
 ------------+-----------+------------
         610 | t         | 0/017CEDF8
 (1 row)
-</programlisting></para>
-
-   <para>
-    The difference between the sequence page LSNs on the publisher and the
-    sequence page LSNs on the subscriber indicates that the sequences are out
-    of sync. Re-synchronize all sequences known to the subscriber using
-    <link linkend="sql-altersubscription-params-refresh-sequences">
-    <command>ALTER SUBSCRIPTION ... REFRESH SEQUENCES</command></link>.
-<programlisting>
-/* sub # */ ALTER SUBSCRIPTION sub1 REFRESH SEQUENCES;
 </programlisting></para>
 
    <para>
@@ -2330,24 +2300,6 @@ CONTEXT:  processing remote data for replication origin "pg_16395" during "INSER
      subscriber but does not fit into the table schema, replication will error
      until the schema is updated.  In many cases, intermittent errors can be
      avoided by applying additive schema changes to the subscriber first.
-    </para>
-   </listitem>
-
-   <listitem>
-    <para>
-     Incremental sequence changes are not replicated.  Although the data in
-     serial or identity columns backed by sequences will be replicated as part
-     of the table, the sequences themselves do not replicate ongoing changes.
-     On the subscriber, a sequence will retain the last value it synchronized
-     from the publisher. If the subscriber is used as a read-only database,
-     then this should typically not be a problem.  If, however, some kind of
-     switchover or failover to the subscriber database is intended, then the
-     sequences would need to be updated to the latest values, either by
-     executing <link linkend="sql-altersubscription-params-refresh-sequences">
-     <command>ALTER SUBSCRIPTION ... REFRESH SEQUENCES</command></link>
-     or by copying the current data from the publisher (perhaps using
-     <command>pg_dump</command>) or by determining a sufficiently high value
-     from the tables themselves.
     </para>
    </listitem>
 

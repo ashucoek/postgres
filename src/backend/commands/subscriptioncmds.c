@@ -1184,58 +1184,6 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 }
 
 /*
- * Marks all sequences with INIT state.
- */
-static void
-AlterSubscription_refresh_seq(Subscription *sub)
-{
-	char	   *err = NULL;
-	WalReceiverConn *wrconn;
-	bool		must_use_password;
-
-	/* Load the library providing us libpq calls. */
-	load_file("libpqwalreceiver", false);
-
-	/* Try to connect to the publisher. */
-	must_use_password = sub->passwordrequired && !sub->ownersuperuser;
-	wrconn = walrcv_connect(sub->conninfo, true, true, must_use_password,
-							sub->name, &err);
-	if (!wrconn)
-		ereport(ERROR,
-				errcode(ERRCODE_CONNECTION_FAILURE),
-				errmsg("subscription \"%s\" could not connect to the publisher: %s",
-					   sub->name, err));
-
-	PG_TRY();
-	{
-		List	   *subrel_states;
-
-		check_publications_origin_sequences(wrconn, sub->publications, true,
-											sub->origin, NULL, 0, sub->name);
-
-		/* Get local sequence list. */
-		subrel_states = GetSubscriptionRelations(sub->oid, false, true, false);
-		foreach_ptr(SubscriptionRelState, subrel, subrel_states)
-		{
-			Oid			relid = subrel->relid;
-
-			UpdateSubscriptionRelState(sub->oid, relid, SUBREL_STATE_INIT,
-									   InvalidXLogRecPtr, false);
-			ereport(DEBUG1,
-					errmsg_internal("sequence \"%s.%s\" of subscription \"%s\" set to INIT state",
-									get_namespace_name(get_rel_namespace(relid)),
-									get_rel_name(relid),
-									sub->name));
-		}
-	}
-	PG_FINALLY();
-	{
-		walrcv_disconnect(wrconn);
-	}
-	PG_END_TRY();
-}
-
-/*
  * Common checks for altering failover, two_phase, and retain_dead_tuples
  * options.
  */
@@ -1867,19 +1815,6 @@ AlterSubscription(ParseState *pstate, AlterSubscriptionStmt *stmt,
 				PreventInTransactionBlock(isTopLevel, "ALTER SUBSCRIPTION ... REFRESH PUBLICATION");
 
 				AlterSubscription_refresh(sub, opts.copy_data, NULL);
-
-				break;
-			}
-
-		case ALTER_SUBSCRIPTION_REFRESH_SEQUENCES:
-			{
-				if (!sub->enabled)
-					ereport(ERROR,
-							errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
-							errmsg("%s is not allowed for disabled subscriptions",
-								   "ALTER SUBSCRIPTION ... REFRESH SEQUENCES"));
-
-				AlterSubscription_refresh_seq(sub);
 
 				break;
 			}

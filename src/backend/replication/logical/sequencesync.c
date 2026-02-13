@@ -19,10 +19,6 @@
  * CREATE SUBSCRIPTION
  * ALTER SUBSCRIPTION ... REFRESH PUBLICATION
  *
- * Executing the following command resets all sequences in the subscription to
- * state INIT, triggering re-synchronization:
- * ALTER SUBSCRIPTION ... REFRESH SEQUENCES
- *
  * The apply worker periodically scans pg_subscription_rel for sequences in
  * INIT state. When such sequences are found, it spawns a sequencesync worker
  * to handle synchronization.
@@ -36,8 +32,24 @@
  * local subscriber, and finally marks each sequence as READY upon successful
  * synchronization.
  *
+ * The sequencesync worker then fetches all sequences that are
+ * in the READY state, queries the publisher for current sequence values, and
+ * updates any sequences that have drifted and then goes to sleep. The sleep
+ * interval starts as SEQSYNC_MIN_SLEEP_MS and doubles after each wake cycle
+ * (up to SEQSYNC_MAX_SLEEP_MS). When drift is detected, the interval resets to
+ * the minimum to ensure timely updates.
+ *
+ * After CREATE SUBSCRIPTION, sequences begin in the INIT state. Sequences
+ * added through ALTER SUBSCRIPTION.. REFRESH PUBLICATION also start in the INIT
+ * state. All INIT sequences are synchronized unconditionally, then transition
+ * to the READY state. Once in the READY state, sequences are checked for drift
+ * from the publisher and synchronized only when drift is detected.
+ *
  * Sequence state transitions follow this pattern:
- *   INIT -> READY
+ *  INIT --> READY ->-+
+ *             ^      | (check/synchronzize)
+ *             |      |
+ *             +--<---+
  *
  * To avoid creating too many transactions, up to MAX_SEQUENCES_SYNC_PER_BATCH
  * sequences are synchronized per transaction. The locks on the sequence
@@ -78,10 +90,15 @@ typedef enum CopySeqResult
 	COPYSEQ_SUCCESS,
 	COPYSEQ_MISMATCH,
 	COPYSEQ_INSUFFICIENT_PERM,
-	COPYSEQ_SKIPPED
+	COPYSEQ_SKIPPED,
+	COPYSEQ_NOWORK,
 } CopySeqResult;
 
-static List *seqinfos = NIL;
+/* Sleep intervals for sync */
+#define SEQSYNC_MIN_SLEEP_MS 2000		/* 2 seconds */
+#define SEQSYNC_MAX_SLEEP_MS 30000		/* 30 seconds */
+
+static long sleep_ms = SEQSYNC_MIN_SLEEP_MS;
 
 /*
  * Apply worker determines if sequence synchronization is needed.
@@ -144,7 +161,7 @@ ProcessSequencesForSync(void)
  * for the given list of sequence indexes.
  */
 static void
-get_sequences_string(List *seqindexes, StringInfo buf)
+get_sequences_string(List *seqindexes, List *seqinfos, StringInfo buf)
 {
 	resetStringInfo(buf);
 	foreach_int(seqidx, seqindexes)
@@ -171,7 +188,7 @@ get_sequences_string(List *seqindexes, StringInfo buf)
  */
 static void
 report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
-					   List *missing_seqs_idx)
+					   List *missing_seqs_idx, List *seqinfos)
 {
 	StringInfo	seqstr;
 
@@ -183,7 +200,7 @@ report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
 
 	if (mismatched_seqs_idx)
 	{
-		get_sequences_string(mismatched_seqs_idx, seqstr);
+		get_sequences_string(mismatched_seqs_idx, seqinfos, seqstr);
 		ereport(WARNING,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				errmsg_plural("mismatched or renamed sequence on subscriber (%s)",
@@ -194,7 +211,7 @@ report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
 
 	if (insuffperm_seqs_idx)
 	{
-		get_sequences_string(insuffperm_seqs_idx, seqstr);
+		get_sequences_string(insuffperm_seqs_idx, seqinfos, seqstr);
 		ereport(WARNING,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				errmsg_plural("insufficient privileges on sequence (%s)",
@@ -205,7 +222,7 @@ report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
 
 	if (missing_seqs_idx)
 	{
-		get_sequences_string(missing_seqs_idx, seqstr);
+		get_sequences_string(missing_seqs_idx, seqinfos, seqstr);
 		ereport(WARNING,
 				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				errmsg_plural("missing sequence on publisher (%s)",
@@ -229,7 +246,8 @@ report_sequence_errors(List *mismatched_seqs_idx, List *insuffperm_seqs_idx,
  */
 static CopySeqResult
 get_and_validate_seq_info(TupleTableSlot *slot, Relation *sequence_rel,
-						  LogicalRepSequenceInfo **seqinfo, int *seqidx)
+						  LogicalRepSequenceInfo **seqinfo, int *seqidx,
+						  List *seqinfos)
 {
 	bool		isnull;
 	int			col = 0;
@@ -325,11 +343,12 @@ get_and_validate_seq_info(TupleTableSlot *slot, Relation *sequence_rel,
 }
 
 /*
- * Apply remote sequence state to local sequence and mark it as
- * synchronized (READY).
+ * Apply remote sequence state to local sequence. If we are doing this
+ * for sequences in the INIT state, move them to the READY state once
+ * synchronized.
  */
 static CopySeqResult
-copy_sequence(LogicalRepSequenceInfo *seqinfo, Oid seqowner)
+copy_sequence(LogicalRepSequenceInfo *seqinfo, Oid seqowner, char relstate)
 {
 	UserContext ucxt;
 	AclResult	aclresult;
@@ -368,19 +387,46 @@ copy_sequence(LogicalRepSequenceInfo *seqinfo, Oid seqowner)
 
 	/*
 	 * Record the remote sequence's LSN in pg_subscription_rel and mark the
-	 * sequence as READY.
+	 * sequence as READY if updating a sequence that is in INIT state.
 	 */
-	UpdateSubscriptionRelState(MySubscription->oid, seqoid, SUBREL_STATE_READY,
-							   seqinfo->page_lsn, false);
+	if (relstate == SUBREL_STATE_INIT)
+		UpdateSubscriptionRelState(MySubscription->oid, seqoid, SUBREL_STATE_READY,
+								   seqinfo->page_lsn, false);
 
 	return COPYSEQ_SUCCESS;
 }
 
 /*
- * Copy existing data of sequences from the publisher.
+ * check_sequence_drift
+ *
+ * Check if the remote sequence values differ from the local sequence.
+ * Returns true/false if any sequences drifted.
  */
-static void
-copy_sequences(WalReceiverConn *conn)
+static bool
+check_sequence_drift(Relation sequence_rel, LogicalRepSequenceInfo *seqinfo)
+{
+	int64		local_last_value;
+	bool		local_is_called;
+
+	/* Get current local sequence state */
+	GetSequence(sequence_rel, &local_last_value, &local_is_called);
+
+	/* Check if values have drifted and return accordingly */
+	return (local_last_value != seqinfo->last_value ||
+		local_is_called != seqinfo->is_called);
+}
+
+/*
+ * Copy existing data of sequences from the publisher.
+ *
+ * If relstate is SUBREL_STATE_READY, only synchronize sequences that
+ * have drifted from their publisher values. Otherwise, synchronize
+ * all sequences.
+ *
+ * Returns true/false if any sequences were actually copied.
+ */
+static bool
+copy_sequences(WalReceiverConn *conn, List *seqinfos, char relstate)
 {
 	int			cur_batch_base_index = 0;
 	int			n_seqinfos = list_length(seqinfos);
@@ -390,12 +436,9 @@ copy_sequences(WalReceiverConn *conn)
 	StringInfo	seqstr = makeStringInfo();
 	StringInfo	cmd = makeStringInfo();
 	MemoryContext oldctx;
+	bool		sequence_copied = false;
 
 #define MAX_SEQUENCES_SYNC_PER_BATCH 100
-
-	elog(DEBUG1,
-		 "logical replication sequence synchronization for subscription \"%s\" - total unsynchronized: %d",
-		 MySubscription->name, n_seqinfos);
 
 	while (cur_batch_base_index < n_seqinfos)
 	{
@@ -406,6 +449,7 @@ copy_sequences(WalReceiverConn *conn)
 		int			batch_mismatched_count = 0;
 		int			batch_skipped_count = 0;
 		int			batch_insuffperm_count = 0;
+		int			batch_no_drift = 0;
 		int			batch_missing_count;
 		Relation	sequence_rel = NULL;
 
@@ -501,20 +545,33 @@ copy_sequences(WalReceiverConn *conn)
 			}
 
 			sync_status = get_and_validate_seq_info(slot, &sequence_rel,
-													&seqinfo, &seqidx);
+													&seqinfo, &seqidx, seqinfos);
+
+			/*
+			 * For sequences in INIT state, always sync.
+			 * Otherwise, for sequences in READY state, only sync if there's drift.
+			 */
 			if (sync_status == COPYSEQ_SUCCESS)
-				sync_status = copy_sequence(seqinfo,
-											sequence_rel->rd_rel->relowner);
+			{
+				if ((relstate == SUBREL_STATE_INIT) || check_sequence_drift(sequence_rel, seqinfo))
+					sync_status = copy_sequence(seqinfo,
+												sequence_rel->rd_rel->relowner,
+												relstate);
+				else
+					sync_status = COPYSEQ_NOWORK;
+			}
 
 			switch (sync_status)
 			{
 				case COPYSEQ_SUCCESS:
 					elog(DEBUG1,
-						 "logical replication synchronization for subscription \"%s\", sequence \"%s.%s\" has finished",
+						 "logical replication sync for subscription \"%s\", sequence \"%s.%s\" has been updated",
 						 MySubscription->name, seqinfo->nspname,
 						 seqinfo->seqname);
 					batch_succeeded_count++;
+					sequence_copied = true;
 					break;
+
 				case COPYSEQ_MISMATCH:
 
 					/*
@@ -528,6 +585,7 @@ copy_sequences(WalReceiverConn *conn)
 					MemoryContextSwitchTo(oldctx);
 					batch_mismatched_count++;
 					break;
+
 				case COPYSEQ_INSUFFICIENT_PERM:
 
 					/*
@@ -541,6 +599,7 @@ copy_sequences(WalReceiverConn *conn)
 					MemoryContextSwitchTo(oldctx);
 					batch_insuffperm_count++;
 					break;
+
 				case COPYSEQ_SKIPPED:
 
 					/*
@@ -558,6 +617,15 @@ copy_sequences(WalReceiverConn *conn)
 						batch_skipped_count++;
 					}
 					break;
+
+				case COPYSEQ_NOWORK:
+					/* Nothing to do */
+					batch_no_drift++;
+					break;
+
+				default:
+					elog(ERROR, "unrecognized Sequence replication result: %d", (int) sync_status);
+
 			}
 
 			if (sequence_rel)
@@ -572,14 +640,16 @@ copy_sequences(WalReceiverConn *conn)
 		batch_missing_count = batch_size - (batch_succeeded_count +
 											batch_mismatched_count +
 											batch_insuffperm_count +
-											batch_skipped_count);
+											batch_skipped_count +
+											batch_no_drift);
 
 		elog(DEBUG1,
-			 "logical replication sequence synchronization for subscription \"%s\" - batch #%d = %d attempted, %d succeeded, %d mismatched, %d insufficient permission, %d missing from publisher, %d skipped",
-			 MySubscription->name,
-			 (cur_batch_base_index / MAX_SEQUENCES_SYNC_PER_BATCH) + 1,
-			 batch_size, batch_succeeded_count, batch_mismatched_count,
-			 batch_insuffperm_count, batch_missing_count, batch_skipped_count);
+		 "logical replication sequence synchronization for subscription \"%s\" - for sequences in %s state batch #%d = %d attempted, %d succeeded, %d mismatched, %d insufficient permission, %d missing from publisher, %d skipped, %d no drift",
+		 MySubscription->name,
+		 (relstate == 'r') ? "READY" : (relstate == 'i') ? "INIT"  : "UNKNOWN",
+		 (cur_batch_base_index / MAX_SEQUENCES_SYNC_PER_BATCH) + 1,
+		 batch_size, batch_succeeded_count, batch_mismatched_count,
+		 batch_insuffperm_count, batch_missing_count, batch_skipped_count, batch_no_drift);
 
 		/* Commit this batch, and prepare for next batch */
 		CommitTransactionCommand();
@@ -607,51 +677,55 @@ copy_sequences(WalReceiverConn *conn)
 
 	/* Report mismatches, permission issues, or missing sequences */
 	report_sequence_errors(mismatched_seqs_idx, insuffperm_seqs_idx,
-						   missing_seqs_idx);
+						   missing_seqs_idx, seqinfos);
+
+	return sequence_copied;
 }
 
 /*
  * Identifies sequences that require synchronization and initiates the
  * synchronization process.
+ *
+ * Returns true if sequences have been updated.
  */
-static void
-LogicalRepSyncSequences(void)
+static bool
+LogicalRepSyncSequences(WalReceiverConn *conn)
 {
-	char	   *err;
-	bool		must_use_password;
 	Relation	rel;
 	HeapTuple	tup;
-	ScanKeyData skey[2];
+	ScanKeyData skey[1];
 	SysScanDesc scan;
 	Oid			subid = MyLogicalRepWorker->subid;
-	StringInfoData app_name;
+	bool		sequence_copied = false;
+	List	   *seqinfos = NIL;
+	List	   *init_seqs = NIL;
+	List	   *ready_seqs = NIL;
 
 	StartTransactionCommand();
 
 	rel = table_open(SubscriptionRelRelationId, AccessShareLock);
 
+	/* Scan for all sequences belonging to this subscription */
 	ScanKeyInit(&skey[0],
 				Anum_pg_subscription_rel_srsubid,
 				BTEqualStrategyNumber, F_OIDEQ,
 				ObjectIdGetDatum(subid));
 
-	ScanKeyInit(&skey[1],
-				Anum_pg_subscription_rel_srsubstate,
-				BTEqualStrategyNumber, F_CHAREQ,
-				CharGetDatum(SUBREL_STATE_INIT));
-
 	scan = systable_beginscan(rel, InvalidOid, false,
-							  NULL, 2, skey);
+							  NULL, 1, skey);
+
 	while (HeapTupleIsValid(tup = systable_getnext(scan)))
 	{
 		Form_pg_subscription_rel subrel;
 		LogicalRepSequenceInfo *seq;
 		Relation	sequence_rel;
 		MemoryContext oldctx;
+		char		relstate;
 
 		CHECK_FOR_INTERRUPTS();
 
 		subrel = (Form_pg_subscription_rel) GETSTRUCT(tup);
+		relstate = subrel->srsubstate;
 
 		sequence_rel = try_table_open(subrel->srrelid, RowExclusiveLock);
 
@@ -666,6 +740,19 @@ LogicalRepSyncSequences(void)
 			continue;
 		}
 
+		/* Error on unexpected states */
+		if (relstate != SUBREL_STATE_INIT && relstate != SUBREL_STATE_READY)
+		{
+			table_close(sequence_rel, NoLock);
+			ereport(ERROR,
+					(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+					 errmsg("unexpected relstate '%c' for sequence \"%s.%s\" in subscription \"%s\"",
+							relstate,
+							get_namespace_name(RelationGetNamespace(sequence_rel)),
+							RelationGetRelationName(sequence_rel),
+							MySubscription->name)));
+		}
+
 		/*
 		 * Worker needs to process sequences across transaction boundary, so
 		 * allocate them under long-lived context.
@@ -677,6 +764,12 @@ LogicalRepSyncSequences(void)
 		seq->nspname = get_namespace_name(RelationGetNamespace(sequence_rel));
 		seq->seqname = pstrdup(RelationGetRelationName(sequence_rel));
 		seqinfos = lappend(seqinfos, seq);
+
+		/* Separate sequences by state for processing */
+		if (relstate == SUBREL_STATE_INIT)
+			init_seqs = lappend(init_seqs, seq);
+		else if (relstate == SUBREL_STATE_READY)
+			ready_seqs = lappend(ready_seqs, seq);
 
 		MemoryContextSwitchTo(oldctx);
 
@@ -693,36 +786,30 @@ LogicalRepSyncSequences(void)
 	 * Exit early if no catalog entries found, likely due to concurrent drops.
 	 */
 	if (!seqinfos)
-		return;
+		return false;
 
-	/* Is the use of a password mandatory? */
-	must_use_password = MySubscription->passwordrequired &&
-		!MySubscription->ownersuperuser;
+	/* Process INIT sequences first */
+	if (init_seqs)
+	{
+		sequence_copied |= copy_sequences(conn, init_seqs, SUBREL_STATE_INIT);
+	}
 
-	initStringInfo(&app_name);
-	appendStringInfo(&app_name, "pg_%u_sequence_sync_" UINT64_FORMAT,
-					 MySubscription->oid, GetSystemIdentifier());
+	/* Then process READY sequences */
+	if (ready_seqs)
+	{
+		sequence_copied |= copy_sequences(conn, ready_seqs, SUBREL_STATE_READY);
+	}
 
-	/*
-	 * Establish the connection to the publisher for sequence synchronization.
-	 */
-	LogRepWorkerWalRcvConn =
-		walrcv_connect(MySubscription->conninfo, true, true,
-					   must_use_password,
-					   app_name.data, &err);
-	if (LogRepWorkerWalRcvConn == NULL)
-		ereport(ERROR,
-				errcode(ERRCODE_CONNECTION_FAILURE),
-				errmsg("sequencesync worker for subscription \"%s\" could not connect to the publisher: %s",
-					   MySubscription->name, err));
+	/* Clean up */
+	list_free(init_seqs);
+	list_free(ready_seqs);
+	list_free(seqinfos);
 
-	pfree(app_name.data);
-
-	copy_sequences(LogRepWorkerWalRcvConn);
+	return sequence_copied;
 }
 
 /*
- * Execute the initial sync with error handling. Disable the subscription,
+ * Execute the sequence sync with error handling. Disable the subscription,
  * if required.
  *
  * Note that we don't handle FATAL errors which are probably because of system
@@ -735,8 +822,67 @@ start_sequence_sync(void)
 
 	PG_TRY();
 	{
-		/* Call initial sync. */
-		LogicalRepSyncSequences();
+		char       *err;
+		bool		must_use_password;
+		StringInfoData app_name;
+
+		/* Is the use of a password mandatory? */
+		must_use_password = MySubscription->passwordrequired &&
+			!MySubscription->ownersuperuser;
+
+		initStringInfo(&app_name);
+		appendStringInfo(&app_name, "pg_%u_sequence_sync_" UINT64_FORMAT,
+						 MySubscription->oid, GetSystemIdentifier());
+
+		/*
+		 * Establish the connection to the publisher for sequence synchronization.
+		 */
+		LogRepWorkerWalRcvConn =
+			walrcv_connect(MySubscription->conninfo, true, true,
+						   must_use_password,
+						   app_name.data, &err);
+		if (LogRepWorkerWalRcvConn == NULL)
+			ereport(ERROR,
+					errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("sequencesync worker for subscription \"%s\" could not connect to the publisher: %s",
+						   MySubscription->name, err));
+
+		pfree(app_name.data);
+
+		for (;;)
+		{
+			bool sequence_copied = false;
+
+			CHECK_FOR_INTERRUPTS();
+
+			/*
+			 * Synchronize all sequences (both READY and INIT states).
+			 * The function will process INIT sequences first, then READY sequences.
+			 */
+			sequence_copied = LogicalRepSyncSequences(LogRepWorkerWalRcvConn);
+
+			/* Adjust sleep interval based on whether sequences were copied over */
+			if (sequence_copied)
+			{
+				sleep_ms = SEQSYNC_MIN_SLEEP_MS;
+			}
+			else
+			{
+
+			/*
+			 * Double the sleep time, but not beyond
+			 * the maximum allowable value.
+			 */
+				sleep_ms = Min(sleep_ms * 2, SEQSYNC_MAX_SLEEP_MS);
+			}
+
+			/* Sleep for the configured interval */
+			(void) WaitLatch(MyLatch,
+							 WL_LATCH_SET | WL_TIMEOUT | WL_EXIT_ON_PM_DEATH,
+							 sleep_ms,
+							 WAIT_EVENT_LOGICAL_SYNC_STATE_CHANGE);
+			ResetLatch(MyLatch);
+		}
 	}
 	PG_CATCH();
 	{
