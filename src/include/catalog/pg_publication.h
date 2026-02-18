@@ -146,16 +146,18 @@ typedef struct PublicationRelInfo
 	Relation	relation;
 	Node	   *whereClause;
 	List	   *columns;
+	bool		except;
 } PublicationRelInfo;
 
 extern Publication *GetPublication(Oid pubid);
 extern Publication *GetPublicationByName(const char *pubname, bool missing_ok);
-extern List *GetRelationPublications(Oid relid);
+extern bool GetRelationPublications(Oid relid, List **pubids, List **except_pubids);
 
 /*---------
- * Expected values for pub_partopt parameter of GetPublicationRelations(),
- * which allows callers to specify which partitions of partitioned tables
- * mentioned in the publication they expect to see.
+ * Expected values for pub_partopt parameter of
+ * GetPublicationIncludedRelations(), which allows callers to specify which
+ * partitions of partitioned tables mentioned in the publication they expect to
+ * see.
  *
  *	ROOT:	only the table explicitly mentioned in the publication
  *	LEAF:	only leaf partitions in given tree
@@ -168,9 +170,10 @@ typedef enum PublicationPartOpt
 	PUBLICATION_PART_ALL,
 } PublicationPartOpt;
 
-extern List *GetPublicationRelations(Oid pubid, PublicationPartOpt pub_partopt);
+extern List *GetPublicationIncludedRelations(Oid pubid,
+											 PublicationPartOpt pub_partopt);
 extern List *GetAllTablesPublications(void);
-extern List *GetAllPublicationRelations(char relkind, bool pubviaroot);
+extern List *GetAllPublicationRelations(Publication *pub, char relkind);
 extern List *GetPublicationSchemas(Oid pubid);
 extern List *GetSchemaPublications(Oid schemaid);
 extern List *GetSchemaPublicationRelations(Oid schemaid,
@@ -185,6 +188,8 @@ extern Oid	GetTopMostAncestorInPublication(Oid puboid, List *ancestors,
 
 extern bool is_publishable_relation(Relation rel);
 extern bool is_schema_publication(Oid pubid);
+extern bool is_relation_excluded(Oid relid, Oid pubid);
+extern bool publication_has_any_exception(Oid pubid);
 extern bool check_and_fetch_column_list(Publication *pub, Oid relid,
 										MemoryContext mcxt, Bitmapset **cols);
 extern ObjectAddress publication_add_relation(Oid pubid, PublicationRelInfo *pri,

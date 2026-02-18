@@ -234,6 +234,12 @@ typedef struct ParallelApplyWorkerInfo
 	ParallelApplyWorkerShared *shared;
 } ParallelApplyWorkerInfo;
 
+typedef struct QualifiedRelationName
+{
+	char	   *schemaname;
+	char	   *relname;
+} QualifiedRelationName;
+
 /* Main memory context for apply worker. Permanent during worker lifetime. */
 extern PGDLLIMPORT MemoryContext ApplyContext;
 

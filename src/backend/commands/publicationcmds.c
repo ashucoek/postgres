@@ -198,7 +198,12 @@ ObjectsInPublicationToOids(List *pubobjspec_list, ParseState *pstate,
 
 		switch (pubobj->pubobjtype)
 		{
+			case PUBLICATIONOBJ_EXCEPT_TABLE:
+				pubobj->pubtable->except = true;
+				*rels = lappend(*rels, pubobj->pubtable);
+				break;
 			case PUBLICATIONOBJ_TABLE:
+				pubobj->pubtable->except = false;
 				*rels = lappend(*rels, pubobj->pubtable);
 				break;
 			case PUBLICATIONOBJ_TABLES_IN_SCHEMA:
@@ -519,8 +524,8 @@ InvalidatePubRelSyncCache(Oid pubid, bool puballtables)
 		 * a target. However, WAL records for TRUNCATE specify both a root and
 		 * its leaves.
 		 */
-		relids = GetPublicationRelations(pubid,
-										 PUBLICATION_PART_ALL);
+		relids = GetPublicationIncludedRelations(pubid,
+												 PUBLICATION_PART_ALL);
 		schemarelids = GetAllSchemaPublicationRelations(pubid,
 														PUBLICATION_PART_ALL);
 
@@ -929,54 +934,60 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 	CommandCounterIncrement();
 
 	/* Associate objects with the publication. */
-	if (stmt->for_all_tables)
+	ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
+							   &schemaidlist);
+
+	/* FOR TABLES IN SCHEMA requires superuser */
+	if (schemaidlist != NIL && !superuser())
+		ereport(ERROR,
+				errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
+				errmsg("must be superuser to create FOR TABLES IN SCHEMA publication"));
+
+	/* Add relations (tables) to the publication. */
+	if (relations != NIL)
 	{
 		/*
-		 * Invalidate relcache so that publication info is rebuilt. Sequences
-		 * publication doesn't require invalidation, as replica identity
-		 * checks don't apply to them.
+		 * The 'relations' list can be non-empty in only two cases:
+		 *
+		 * 1. CREATE PUBLICATION ... FOR TABLE In this case, 'relations'
+		 * contains the list of specified tables.
+		 *
+		 * 2. CREATE PUBLICATION ... FOR ALL TABLES In this case, 'relations'
+		 * contains the list of tables specified in the EXCEPT TABLE clause.
+		 * During parsing, the 'except' flag is set for the associated
+		 * PublicationRelInfo objects.
 		 */
-		CacheInvalidateRelcacheAll();
+		List	   *rels;
+
+		rels = OpenTableList(relations);
+		TransformPubWhereClauses(rels, pstate->p_sourcetext,
+								 publish_via_partition_root);
+
+		CheckPubRelationColumnList(stmt->pubname, rels,
+								   schemaidlist != NIL,
+								   publish_via_partition_root);
+
+		PublicationAddTables(puboid, rels, true, NULL);
+		CloseTableList(rels);
 	}
-	else if (!stmt->for_all_sequences)
+
+	if (schemaidlist != NIL)
 	{
-		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
-								   &schemaidlist);
-
-		/* FOR TABLES IN SCHEMA requires superuser */
-		if (schemaidlist != NIL && !superuser())
-			ereport(ERROR,
-					errcode(ERRCODE_INSUFFICIENT_PRIVILEGE),
-					errmsg("must be superuser to create FOR TABLES IN SCHEMA publication"));
-
-		if (relations != NIL)
-		{
-			List	   *rels;
-
-			rels = OpenTableList(relations);
-			TransformPubWhereClauses(rels, pstate->p_sourcetext,
-									 publish_via_partition_root);
-
-			CheckPubRelationColumnList(stmt->pubname, rels,
-									   schemaidlist != NIL,
-									   publish_via_partition_root);
-
-			PublicationAddTables(puboid, rels, true, NULL);
-			CloseTableList(rels);
-		}
-
-		if (schemaidlist != NIL)
-		{
-			/*
-			 * Schema lock is held until the publication is created to prevent
-			 * concurrent schema deletion.
-			 */
-			LockSchemaList(schemaidlist);
-			PublicationAddSchemas(puboid, schemaidlist, true, NULL);
-		}
+		/*
+		 * Schema lock is held until the publication is created to prevent
+		 * concurrent schema deletion.
+		 */
+		LockSchemaList(schemaidlist);
+		PublicationAddSchemas(puboid, schemaidlist, true, NULL);
 	}
 
 	table_close(rel, RowExclusiveLock);
+
+	if (stmt->for_all_tables)
+	{
+		/* Invalidate relcache so that publication info is rebuilt. */
+		CacheInvalidateRelcacheAll();
+	}
 
 	InvokeObjectPostCreateHook(PublicationRelationId, puboid, 0);
 
@@ -1050,8 +1061,8 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 		LockDatabaseObject(PublicationRelationId, pubform->oid, 0,
 						   AccessShareLock);
 
-		root_relids = GetPublicationRelations(pubform->oid,
-											  PUBLICATION_PART_ROOT);
+		root_relids = GetPublicationIncludedRelations(pubform->oid,
+													  PUBLICATION_PART_ROOT);
 
 		foreach(lc, root_relids)
 		{
@@ -1170,8 +1181,8 @@ AlterPublicationOptions(ParseState *pstate, AlterPublicationStmt *stmt,
 		 * trees, not just those explicitly mentioned in the publication.
 		 */
 		if (root_relids == NIL)
-			relids = GetPublicationRelations(pubform->oid,
-											 PUBLICATION_PART_ALL);
+			relids = GetPublicationIncludedRelations(pubform->oid,
+													 PUBLICATION_PART_ALL);
 		else
 		{
 			/*
@@ -1256,8 +1267,8 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		PublicationDropTables(pubid, rels, false);
 	else						/* AP_SetObjects */
 	{
-		List	   *oldrelids = GetPublicationRelations(pubid,
-														PUBLICATION_PART_ROOT);
+		List	   *oldrelids = GetPublicationIncludedRelations(pubid,
+																PUBLICATION_PART_ROOT);
 		List	   *delrels = NIL;
 		ListCell   *oldlc;
 
@@ -1358,6 +1369,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 				oldrel = palloc_object(PublicationRelInfo);
 				oldrel->whereClause = NULL;
 				oldrel->columns = NIL;
+				oldrel->except = false;
 				oldrel->relation = table_open(oldrelid,
 											  ShareUpdateExclusiveLock);
 				delrels = lappend(delrels, oldrel);
@@ -1408,7 +1420,8 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
 		ListCell   *lc;
 		List	   *reloids;
 
-		reloids = GetPublicationRelations(pubform->oid, PUBLICATION_PART_ROOT);
+		reloids = GetPublicationIncludedRelations(pubform->oid,
+												  PUBLICATION_PART_ROOT);
 
 		foreach(lc, reloids)
 		{
@@ -1771,6 +1784,7 @@ OpenTableList(List *tables)
 		pub_rel->relation = rel;
 		pub_rel->whereClause = t->whereClause;
 		pub_rel->columns = t->columns;
+		pub_rel->except = t->except;
 		rels = lappend(rels, pub_rel);
 		relids = lappend_oid(relids, myrelid);
 
@@ -1843,6 +1857,7 @@ OpenTableList(List *tables)
 
 				/* child inherits column list from parent */
 				pub_rel->columns = t->columns;
+				pub_rel->except = t->except;
 				rels = lappend(rels, pub_rel);
 				relids = lappend_oid(relids, childrelid);
 

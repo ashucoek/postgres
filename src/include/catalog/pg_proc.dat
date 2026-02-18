@@ -12336,6 +12336,13 @@
   proname => 'pg_relation_is_publishable', provolatile => 's',
   prorettype => 'bool', proargtypes => 'regclass',
   prosrc => 'pg_relation_is_publishable' },
+{ oid => '9002', descr => 'get effective tables for publication',
+  proname => 'pg_get_publication_effective_tables',  prorows => '1000',
+  proretset => 't', provolatile => 's',
+  prorettype => 'record', proargtypes => 'oid _text',
+  proallargtypes => '{oid,_text,text,text}', proargmodes => '{i,i,o,o}',
+  proargnames => '{root_relid,pub_names,schemaname,relname}',
+  prosrc => 'pg_get_publication_effective_tables' },
 
 # rls
 { oid => '3298',

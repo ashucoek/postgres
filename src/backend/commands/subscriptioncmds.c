@@ -550,6 +550,84 @@ check_publications(WalReceiverConn *wrconn, List *publications)
 }
 
 /*
+ * Throws an ERROR if multiple publications with except clauses are found.
+ *
+ * This check is mandatory because logical replication currently does not
+ * support subscribing to multiple publications if more than one of them
+ * uses an exclusion list.
+ *
+ * Combining different exclusion lists with varying settings for
+ * 'publish_via_partition_root' can result in ambiguous publication
+ * identities. To ensure predictable replication behavior, a single
+ * subscription may only include one 'FOR ALL TABLES' publication that
+ * specifies an EXCEPT clause.
+ */
+static void
+check_publications_except_list(WalReceiverConn *wrconn, List *publications)
+{
+	List	   *except_publications = NIL;
+	WalRcvExecResult *res;
+	StringInfoData cmd;
+	StringInfoData pubnames;
+	TupleTableSlot *slot;
+	Oid			tableRow[1] = {TEXTOID};
+
+	if (list_length(publications) <= 1)
+		return;
+
+	initStringInfo(&cmd);
+	appendStringInfoString(&cmd,
+							"SELECT p.pubname\n"
+							" FROM pg_catalog.pg_publication p\n"
+							" WHERE p.pubname IN (");
+
+	GetPublicationsStr(publications, &cmd, true);
+
+	appendStringInfoString(&cmd,
+							")\n"
+							"   AND EXISTS (SELECT 1\n"
+							"                 FROM pg_catalog.pg_publication_rel pr\n"
+							"                WHERE pr.prpubid = p.oid\n"
+							"                  AND pr.prexcept IS TRUE)");
+
+	res = walrcv_exec(wrconn, cmd.data, 1, tableRow);
+	pfree(cmd.data);
+
+	if (res->status != WALRCV_OK_TUPLES)
+		ereport(ERROR,
+				errmsg("could not receive list of publications from the publisher: %s",
+						res->err));
+
+	slot = MakeSingleTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple);
+	while (tuplestore_gettupleslot(res->tuplestore, true, false, slot))
+	{
+		char	   *pubname;
+		bool		isnull;
+
+		pubname = TextDatumGetCString(slot_getattr(slot, 1, &isnull));
+		Assert(!isnull);
+
+		except_publications = lappend(except_publications, makeString(pubname));
+		ExecClearTuple(slot);
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+
+	walrcv_clear_result(res);
+
+	if (list_length(except_publications) <= 1)
+		return;
+
+	initStringInfo(&pubnames);
+	GetPublicationsStr(except_publications, &pubnames, false);
+
+	ereport(ERROR,
+			errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+			errmsg("publications %s are defined with EXCEPT TABLE", pubnames.data),
+			errhint("Subscription cannot be created using multiple publications that specify EXCEPT TABLE."));
+}
+
+/*
  * Auxiliary function to build a text array out of a list of String nodes.
  */
 static Datum
@@ -795,6 +873,7 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 			char		relation_state;
 
 			check_publications(wrconn, publications);
+			check_publications_except_list(wrconn, publications);
 			check_publications_origin_tables(wrconn, publications,
 											 opts.copy_data,
 											 opts.retaindeadtuples, opts.origin,
@@ -958,6 +1037,8 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 	{
 		if (validate_publications)
 			check_publications(wrconn, validate_publications);
+
+		check_publications_except_list(wrconn, sub->publications);
 
 		/* Get the relation list from publisher. */
 		pubrels = fetch_relation_list(wrconn, sub->publications);
@@ -2940,6 +3021,8 @@ fetch_relation_list(WalReceiverConn *wrconn, List *publications)
 						 pub_names.data);
 	}
 
+	elog(LOG, "fetch_relation_list: executing query to fetch effectiverelations: \n%s",
+		 cmd.data);
 	pfree(pub_names.data);
 
 	res = walrcv_exec(wrconn, cmd.data, column_count, tableRow);
