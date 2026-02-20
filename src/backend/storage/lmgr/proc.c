@@ -1609,9 +1609,15 @@ ProcSleep(LOCALLOCK *locallock)
 											   "Processes holding the lock: %s. Wait queue: %s.",
 											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
 			else if (myWaitStatus == PROC_WAIT_STATUS_OK)
+			{
+				/* Increment the timed lock statistics counters */
+				pgstat_count_lock_timed_wait(locallock->tag.lock.locktag_type,
+											 msecs);
+
 				ereport(LOG,
 						(errmsg("process %d acquired %s on %s after %ld.%03d ms",
 								MyProcPid, modename, buf.data, msecs, usecs)));
+			}
 			else
 			{
 				Assert(myWaitStatus == PROC_WAIT_STATUS_ERROR);
@@ -1645,6 +1651,9 @@ ProcSleep(LOCALLOCK *locallock)
 			pfree(lock_waiters_sbuf.data);
 		}
 	} while (myWaitStatus == PROC_WAIT_STATUS_WAITING);
+
+	/* Count lock waits unconditionally, regardless of log_lock_waits */
+	pgstat_count_lock_waits(locallock->tag.lock.locktag_type);
 
 	/*
 	 * Disable the timers, if they are still running.  As in LockErrorCleanup,
