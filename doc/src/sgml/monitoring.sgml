@@ -3193,7 +3193,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        </para>
        <para>
         Number of times a lock of this type had to wait because of a
-        conflicting lock. Only incremented when <xref linkend="guc-log-lock-waits"/>
+        conflicting lock. Only incremented when <xref linkend="guc-track-lock-timing"/>
         is enabled and the lock was successfully acquired after waiting longer
         than <xref linkend="guc-deadlock-timeout"/>.
        </para>
@@ -3207,7 +3207,7 @@ description | Waiting for a newly initialized WAL file to reach durable storage
        </para>
        <para>
         Total time spent waiting for locks of this type, in milliseconds.
-        Only incremented when <xref linkend="guc-log-lock-waits"/> is enabled and
+        Only incremented when <xref linkend="guc-track-lock-timing"/> is enabled and
         the lock was successfully acquired after waiting longer than
         <xref linkend="guc-deadlock-timeout"/>.
        </para>

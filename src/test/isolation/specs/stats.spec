@@ -132,7 +132,7 @@ step s1_slru_check_stats {
 
 # Lock stats steps
 step s1_set_deadlock_timeout { SET deadlock_timeout = '10ms'; }
-step s1_set_log_lock_waits { SET log_lock_waits = on; }
+step s1_set_track_lock_timing { SET track_lock_timing = on; }
 step s1_reset_stat_lock { SELECT pg_stat_reset_shared('lock'); }
 step s1_sleep { SELECT pg_sleep(0.5); }
 step s1_lock_relation { LOCK TABLE test_stat_tab; }
@@ -174,8 +174,8 @@ step s2_big_notify { SELECT pg_notify('stats_test_use',
 
 # Lock stats steps
 step s2_set_deadlock_timeout { SET deadlock_timeout = '10ms'; }
-step s2_set_log_lock_waits { SET log_lock_waits = on; }
-step s2_unset_log_lock_waits { SET log_lock_waits = off; }
+step s2_set_track_lock_timing { SET track_lock_timing = on; }
+step s2_unset_track_lock_timing { SET track_lock_timing = off; }
 step s2_report_stat_lock_relation { SELECT waits > 0, timed_waits = waits, wait_time > 500 FROM pg_stat_lock WHERE locktype = 'relation'; }
 step s2_report_stat_lock_transactionid { SELECT waits > 0, timed_waits = waits, wait_time > 500 FROM pg_stat_lock WHERE locktype = 'transactionid'; }
 step s2_report_stat_lock_advisory { SELECT waits > 0, timed_waits = waits, wait_time > 500 FROM pg_stat_lock WHERE locktype = 'advisory'; }
@@ -793,9 +793,9 @@ permutation
 permutation
   s1_set_deadlock_timeout
   s1_reset_stat_lock
-  s1_set_log_lock_waits
+  s1_set_track_lock_timing
   s2_set_deadlock_timeout
-  s2_set_log_lock_waits
+  s2_set_track_lock_timing
   s1_begin
   s1_lock_relation
   s2_begin
@@ -811,9 +811,9 @@ permutation
 permutation
   s1_set_deadlock_timeout
   s1_reset_stat_lock
-  s1_set_log_lock_waits
+  s1_set_track_lock_timing
   s2_set_deadlock_timeout
-  s2_set_log_lock_waits
+  s2_set_track_lock_timing
   s1_table_insert
   s1_begin
   s1_table_update_k1
@@ -830,9 +830,9 @@ permutation
 permutation
   s1_set_deadlock_timeout
   s1_reset_stat_lock
-  s1_set_log_lock_waits
+  s1_set_track_lock_timing
   s2_set_deadlock_timeout
-  s2_set_log_lock_waits
+  s2_set_track_lock_timing
   s1_lock_advisory_lock
   s2_begin
   s2_ff
@@ -843,14 +843,14 @@ permutation
   s2_commit
   s2_report_stat_lock_advisory
 
-# Ensure log_lock_waits behaves correctly
+# Ensure track_lock_timing behaves correctly
 
 permutation
   s1_set_deadlock_timeout
   s1_reset_stat_lock
-  s1_set_log_lock_waits
+  s1_set_track_lock_timing
   s2_set_deadlock_timeout
-  s2_unset_log_lock_waits
+  s2_unset_track_lock_timing
   s1_begin
   s1_lock_relation
   s2_begin

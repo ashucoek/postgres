@@ -62,6 +62,7 @@ int			IdleInTransactionSessionTimeout = 0;
 int			TransactionTimeout = 0;
 int			IdleSessionTimeout = 0;
 bool		log_lock_waits = true;
+bool		track_lock_timing = true;
 
 /* Pointer to this process's PGPROC struct, if any */
 PGPROC	   *MyProc = NULL;
@@ -1545,99 +1546,110 @@ ProcSleep(LOCALLOCK *locallock)
 
 		/*
 		 * If awoken after the deadlock check interrupt has run, and
-		 * log_lock_waits is on, then report about the wait.
+		 * log_lock_waits or track_lock_timing is on, then report or track
+		 * about the wait.
 		 */
-		if (log_lock_waits && deadlock_state != DS_NOT_YET_CHECKED)
+		if ((log_lock_waits || track_lock_timing) &&
+			deadlock_state != DS_NOT_YET_CHECKED)
 		{
-			StringInfoData buf,
-						lock_waiters_sbuf,
-						lock_holders_sbuf;
-			const char *modename;
 			long		secs;
 			int			usecs;
 			long		msecs;
-			int			lockHoldersNum = 0;
 
-			initStringInfo(&buf);
-			initStringInfo(&lock_waiters_sbuf);
-			initStringInfo(&lock_holders_sbuf);
-
-			DescribeLockTag(&buf, &locallock->tag.lock);
-			modename = GetLockmodeName(locallock->tag.lock.locktag_lockmethodid,
-									   lockmode);
 			TimestampDifference(get_timeout_start_time(DEADLOCK_TIMEOUT),
 								GetCurrentTimestamp(),
 								&secs, &usecs);
 			msecs = secs * 1000 + usecs / 1000;
 			usecs = usecs % 1000;
 
-			/* Gather a list of all lock holders and waiters */
-			LWLockAcquire(partitionLock, LW_SHARED);
-			GetLockHoldersAndWaiters(locallock, &lock_holders_sbuf,
-									 &lock_waiters_sbuf, &lockHoldersNum);
-			LWLockRelease(partitionLock);
-
-			if (deadlock_state == DS_SOFT_DEADLOCK)
-				ereport(LOG,
-						(errmsg("process %d avoided deadlock for %s on %s by rearranging queue order after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-											   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
-			else if (deadlock_state == DS_HARD_DEADLOCK)
-			{
-				/*
-				 * This message is a bit redundant with the error that will be
-				 * reported subsequently, but in some cases the error report
-				 * might not make it to the log (eg, if it's caught by an
-				 * exception handler), and we want to ensure all long-wait
-				 * events get logged.
-				 */
-				ereport(LOG,
-						(errmsg("process %d detected deadlock while waiting for %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-											   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
-			}
-
-			if (myWaitStatus == PROC_WAIT_STATUS_WAITING)
-				ereport(LOG,
-						(errmsg("process %d still waiting for %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs),
-						 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
-											   "Processes holding the lock: %s. Wait queue: %s.",
-											   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
-			else if (myWaitStatus == PROC_WAIT_STATUS_OK)
-			{
-				/* Increment the timed lock statistics counters */
+			/* Increment the timed lock statistics counters */
+			if (track_lock_timing && myWaitStatus == PROC_WAIT_STATUS_OK)
 				pgstat_count_lock_timed_wait(locallock->tag.lock.locktag_type,
 											 msecs);
 
-				ereport(LOG,
-						(errmsg("process %d acquired %s on %s after %ld.%03d ms",
-								MyProcPid, modename, buf.data, msecs, usecs)));
-			}
-			else
+			if (log_lock_waits)
 			{
-				Assert(myWaitStatus == PROC_WAIT_STATUS_ERROR);
+				StringInfoData buf,
+							lock_waiters_sbuf,
+							lock_holders_sbuf;
+				const char *modename;
+				int			lockHoldersNum = 0;
 
-				/*
-				 * Currently, the deadlock checker always kicks its own
-				 * process, which means that we'll only see
-				 * PROC_WAIT_STATUS_ERROR when deadlock_state ==
-				 * DS_HARD_DEADLOCK, and there's no need to print redundant
-				 * messages.  But for completeness and future-proofing, print
-				 * a message if it looks like someone else kicked us off the
-				 * lock.
-				 */
-				if (deadlock_state != DS_HARD_DEADLOCK)
+				initStringInfo(&buf);
+				initStringInfo(&lock_waiters_sbuf);
+				initStringInfo(&lock_holders_sbuf);
+
+				DescribeLockTag(&buf, &locallock->tag.lock);
+				modename = GetLockmodeName(locallock->tag.lock.locktag_lockmethodid,
+										   lockmode);
+
+				/* Gather a list of all lock holders and waiters */
+				LWLockAcquire(partitionLock, LW_SHARED);
+				GetLockHoldersAndWaiters(locallock, &lock_holders_sbuf,
+										 &lock_waiters_sbuf, &lockHoldersNum);
+				LWLockRelease(partitionLock);
+
+				if (deadlock_state == DS_SOFT_DEADLOCK)
 					ereport(LOG,
-							(errmsg("process %d failed to acquire %s on %s after %ld.%03d ms",
+							(errmsg("process %d avoided deadlock for %s on %s by rearranging queue order after %ld.%03d ms",
 									MyProcPid, modename, buf.data, msecs, usecs),
 							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
 												   "Processes holding the lock: %s. Wait queue: %s.",
 												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				else if (deadlock_state == DS_HARD_DEADLOCK)
+				{
+					/*
+					 * This message is a bit redundant with the error that
+					 * will be reported subsequently, but in some cases the
+					 * error report might not make it to the log (eg, if it's
+					 * caught by an exception handler), and we want to ensure
+					 * all long-wait events get logged.
+					 */
+					ereport(LOG,
+							(errmsg("process %d detected deadlock while waiting for %s on %s after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
+							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+												   "Processes holding the lock: %s. Wait queue: %s.",
+												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				}
+
+				if (myWaitStatus == PROC_WAIT_STATUS_WAITING)
+					ereport(LOG,
+							(errmsg("process %d still waiting for %s on %s after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs),
+							 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+												   "Processes holding the lock: %s. Wait queue: %s.",
+												   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+
+				else if (myWaitStatus == PROC_WAIT_STATUS_OK)
+					ereport(LOG,
+							(errmsg("process %d acquired %s on %s after %ld.%03d ms",
+									MyProcPid, modename, buf.data, msecs, usecs)));
+				else
+				{
+					Assert(myWaitStatus == PROC_WAIT_STATUS_ERROR);
+
+					/*
+					 * Currently, the deadlock checker always kicks its own
+					 * process, which means that we'll only see
+					 * PROC_WAIT_STATUS_ERROR when deadlock_state ==
+					 * DS_HARD_DEADLOCK, and there's no need to print
+					 * redundant messages.  But for completeness and
+					 * future-proofing, print a message if it looks like
+					 * someone else kicked us off the lock.
+					 */
+					if (deadlock_state != DS_HARD_DEADLOCK)
+						ereport(LOG,
+								(errmsg("process %d failed to acquire %s on %s after %ld.%03d ms",
+										MyProcPid, modename, buf.data, msecs, usecs),
+								 (errdetail_log_plural("Process holding the lock: %s. Wait queue: %s.",
+													   "Processes holding the lock: %s. Wait queue: %s.",
+													   lockHoldersNum, lock_holders_sbuf.data, lock_waiters_sbuf.data))));
+				}
+
+				pfree(buf.data);
+				pfree(lock_holders_sbuf.data);
+				pfree(lock_waiters_sbuf.data);
 			}
 
 			/*
@@ -1645,14 +1657,13 @@ ProcSleep(LOCALLOCK *locallock)
 			 * state so we don't print the above messages again.
 			 */
 			deadlock_state = DS_NO_DEADLOCK;
-
-			pfree(buf.data);
-			pfree(lock_holders_sbuf.data);
-			pfree(lock_waiters_sbuf.data);
 		}
 	} while (myWaitStatus == PROC_WAIT_STATUS_WAITING);
 
-	/* Count lock waits unconditionally, regardless of log_lock_waits */
+	/*
+	 * Count lock waits unconditionally, regardless of log_lock_waits or
+	 * track_lock_timing.
+	 */
 	pgstat_count_lock_waits(locallock->tag.lock.locktag_type);
 
 	/*

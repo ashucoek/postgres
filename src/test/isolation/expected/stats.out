@@ -3752,7 +3752,7 @@ test_stat_func|                         1|t               |t
 
 step s1_commit: COMMIT;
 
-starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_log_lock_waits s2_set_deadlock_timeout s2_set_log_lock_waits s1_begin s1_lock_relation s2_begin s2_ff s2_lock_relation s1_sleep s1_commit s2_commit s2_report_stat_lock_relation
+starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_track_lock_timing s2_set_deadlock_timeout s2_set_track_lock_timing s1_begin s1_lock_relation s2_begin s2_ff s2_lock_relation s1_sleep s1_commit s2_commit s2_report_stat_lock_relation
 pg_stat_force_next_flush
 ------------------------
                         
@@ -3765,9 +3765,9 @@ pg_stat_reset_shared
                     
 (1 row)
 
-step s1_set_log_lock_waits: SET log_lock_waits = on;
+step s1_set_track_lock_timing: SET track_lock_timing = on;
 step s2_set_deadlock_timeout: SET deadlock_timeout = '10ms';
-step s2_set_log_lock_waits: SET log_lock_waits = on;
+step s2_set_track_lock_timing: SET track_lock_timing = on;
 step s1_begin: BEGIN;
 step s1_lock_relation: LOCK TABLE test_stat_tab;
 step s2_begin: BEGIN;
@@ -3794,7 +3794,7 @@ t       |t       |t
 (1 row)
 
 
-starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_log_lock_waits s2_set_deadlock_timeout s2_set_log_lock_waits s1_table_insert s1_begin s1_table_update_k1 s2_begin s2_ff s2_table_update_k1 s1_sleep s1_commit s2_commit s2_report_stat_lock_transactionid
+starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_track_lock_timing s2_set_deadlock_timeout s2_set_track_lock_timing s1_table_insert s1_begin s1_table_update_k1 s2_begin s2_ff s2_table_update_k1 s1_sleep s1_commit s2_commit s2_report_stat_lock_transactionid
 pg_stat_force_next_flush
 ------------------------
                         
@@ -3807,9 +3807,9 @@ pg_stat_reset_shared
                     
 (1 row)
 
-step s1_set_log_lock_waits: SET log_lock_waits = on;
+step s1_set_track_lock_timing: SET track_lock_timing = on;
 step s2_set_deadlock_timeout: SET deadlock_timeout = '10ms';
-step s2_set_log_lock_waits: SET log_lock_waits = on;
+step s2_set_track_lock_timing: SET track_lock_timing = on;
 step s1_table_insert: INSERT INTO test_stat_tab(key, value) VALUES('k1', 1), ('k2', 1), ('k3', 1);
 step s1_begin: BEGIN;
 step s1_table_update_k1: UPDATE test_stat_tab SET value = value + 1 WHERE key = 'k1';
@@ -3837,7 +3837,7 @@ t       |t       |t
 (1 row)
 
 
-starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_log_lock_waits s2_set_deadlock_timeout s2_set_log_lock_waits s1_lock_advisory_lock s2_begin s2_ff s2_lock_advisory_lock s1_sleep s1_lock_advisory_unlock s2_lock_advisory_unlock s2_commit s2_report_stat_lock_advisory
+starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_track_lock_timing s2_set_deadlock_timeout s2_set_track_lock_timing s1_lock_advisory_lock s2_begin s2_ff s2_lock_advisory_lock s1_sleep s1_lock_advisory_unlock s2_lock_advisory_unlock s2_commit s2_report_stat_lock_advisory
 pg_stat_force_next_flush
 ------------------------
                         
@@ -3850,9 +3850,9 @@ pg_stat_reset_shared
                     
 (1 row)
 
-step s1_set_log_lock_waits: SET log_lock_waits = on;
+step s1_set_track_lock_timing: SET track_lock_timing = on;
 step s2_set_deadlock_timeout: SET deadlock_timeout = '10ms';
-step s2_set_log_lock_waits: SET log_lock_waits = on;
+step s2_set_track_lock_timing: SET track_lock_timing = on;
 step s1_lock_advisory_lock: SELECT pg_advisory_lock(1);
 pg_advisory_lock
 ----------------
@@ -3899,7 +3899,7 @@ t       |t       |t
 (1 row)
 
 
-starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_log_lock_waits s2_set_deadlock_timeout s2_unset_log_lock_waits s1_begin s1_lock_relation s2_begin s2_ff s2_lock_relation s1_sleep s1_commit s2_commit s2_report_stat_lock_relation
+starting permutation: s1_set_deadlock_timeout s1_reset_stat_lock s1_set_track_lock_timing s2_set_deadlock_timeout s2_unset_track_lock_timing s1_begin s1_lock_relation s2_begin s2_ff s2_lock_relation s1_sleep s1_commit s2_commit s2_report_stat_lock_relation
 pg_stat_force_next_flush
 ------------------------
                         
@@ -3912,9 +3912,9 @@ pg_stat_reset_shared
                     
 (1 row)
 
-step s1_set_log_lock_waits: SET log_lock_waits = on;
+step s1_set_track_lock_timing: SET track_lock_timing = on;
 step s2_set_deadlock_timeout: SET deadlock_timeout = '10ms';
-step s2_unset_log_lock_waits: SET log_lock_waits = off;
+step s2_unset_track_lock_timing: SET track_lock_timing = off;
 step s1_begin: BEGIN;
 step s1_lock_relation: LOCK TABLE test_stat_tab;
 step s2_begin: BEGIN;

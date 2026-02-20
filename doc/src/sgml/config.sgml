@@ -8841,6 +8841,25 @@ COPY postgres_log FROM '/full/path/to/logfile.csv' WITH csv;
       </listitem>
      </varlistentry>
 
+     <varlistentry id="guc-track-lock-timing" xreflabel="track_lock_timing">
+      <term><varname>track_lock_timing</varname> (<type>boolean</type>)
+      <indexterm>
+       <primary><varname>track_lock_timing</varname> configuration parameter</primary>
+      </indexterm>
+      </term>
+      <listitem>
+       <para>
+        Enables timing of lock waits. This parameter is on by default, as it tracks
+        only the timings for successful acquisitions that waited longer than
+        <xref linkend="guc-deadlock-timeout"/>. Lock timing information is
+        displayed in the <link linkend="monitoring-pg-stat-lock-view">
+        <structname>pg_stat_lock</structname></link> view.
+        Only superusers and users with the appropriate <literal>SET</literal>
+        privilege can change this setting.
+       </para>
+      </listitem>
+     </varlistentry>
+
      <varlistentry id="guc-track-wal-io-timing" xreflabel="track_wal_io_timing">
       <term><varname>track_wal_io_timing</varname> (<type>boolean</type>)
       <indexterm>
