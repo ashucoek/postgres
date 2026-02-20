@@ -1797,12 +1797,21 @@ pgoutput_shutdown(LogicalDecodingContext *ctx)
  * to silently continue the replication in the absence of a missing publication.
  * This is required because we allow the users to create publications after they
  * have specified the required publications at the time of replication start.
+ *
+ * We also enforce that no more than one publication in the list may contain
+ * an EXCEPT TABLE clause. Using multiple publications with EXCEPT TABLE clause
+ * is currently unsupported to prevent non-deterministic filtering behavior
+ * across overlapping publication sets.
+ *
+ * Given a list of publication names, look up each publication and return
+ * a list of Publication objects corresponding to the valid publications.
  */
 static List *
 LoadPublications(List *pubnames)
 {
 	List	   *result = NIL;
 	ListCell   *lc;
+	List	   *pubnames_with_except = NIL;
 
 	foreach(lc, pubnames)
 	{
@@ -1810,7 +1819,13 @@ LoadPublications(List *pubnames)
 		Publication *pub = GetPublicationByName(pubname, true);
 
 		if (pub)
+		{
 			result = lappend(result, pub);
+
+			/* Check if this publication has an EXCEPT TABLE list. */
+			if (publication_has_any_except_table(pub->oid))
+				pubnames_with_except = lappend(pubnames_with_except, pstrdup(pubname));
+		}
 		else
 			ereport(WARNING,
 					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -1819,6 +1834,25 @@ LoadPublications(List *pubnames)
 					errhint("Create the publication if it does not exist."));
 	}
 
+	/*
+	 * If more than one publication has an EXCEPT list, throw an error listing
+	 * all the problematic publications.
+	 */
+	if (list_length(pubnames_with_except) > 1)
+	{
+		StringInfoData pub_names_str;
+
+		initStringInfo(&pub_names_str);
+		GetPublicationsStr(pubnames_with_except, &pub_names_str, true);
+
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot use multiple publications with EXCEPT TABLE lists"),
+				errdetail("Publications (%s) define EXCEPT TABLE clauses.",
+						  pub_names_str.data));
+	}
+
+	list_free_deep(pubnames_with_except);
 	return result;
 }
 
@@ -2043,6 +2077,73 @@ set_schema_sent_in_streamed_txn(RelationSyncEntry *entry, TransactionId xid)
 }
 
 /*
+ * publication_has_publishable_partitions
+ *
+ * Checks if the publication has any effective data in a partition tree.
+ * Returns true if at least one leaf is NOT excluded.
+ */
+static bool
+publication_has_publishable_partitions(Oid root_relid, Oid pubid)
+{
+	List	   *all_leaves = NIL;
+	List	   *except_tables_in_pub = NIL;
+
+	Assert(get_rel_relkind(root_relid) == RELKIND_PARTITIONED_TABLE);
+
+	except_tables_in_pub = GetExcludedTablesByPub(pubid,
+												  PUBLICATION_PART_LEAF);
+
+	if (except_tables_in_pub == NIL)
+		return false;
+
+	/* Get all leaf relations in the hierarchy */
+	all_leaves = GetPubPartitionOptionRelations(NIL,
+												PUBLICATION_PART_LEAF,
+												root_relid);
+
+	/*
+	 * Traverse leaves. If we find even ONE leaf that is not excluded by the
+	 * publication's EXCEPT list, the tree is effective.
+	 */
+	foreach_oid(curr_relid, all_leaves)
+	{
+		bool		relation_in_except = false;
+		List	   *ancestors;
+
+		/* Check if the leaf itself is an exception */
+		if (list_member_oid(except_tables_in_pub, curr_relid))
+			continue;
+
+		/* Check if any ancestor is an exception */
+		ancestors = get_partition_ancestors(curr_relid);
+
+		foreach_oid(ancestor, ancestors)
+		{
+			if (list_member_oid(except_tables_in_pub, ancestor))
+			{
+				relation_in_except = true;
+				break;
+			}
+		}
+
+		list_free(ancestors);
+
+		/*
+		 * If this leaf is not listed in the EXCEPT clause, the publication
+		 * effectively includes data from this partition tree.
+		 */
+		if (!relation_in_except)
+		{
+			list_free(all_leaves);
+			return true;
+		}
+	}
+
+	list_free(all_leaves);
+	return false;
+}
+
+/*
  * Find or create entry in the relation schema cache.
  *
  * This looks up publications that the given relation is directly or
@@ -2089,7 +2190,7 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 	if (!entry->replicate_valid)
 	{
 		Oid			schemaId = get_rel_namespace(relid);
-		List	   *pubids = GetRelationPublications(relid);
+		List	   *pubids = NIL;
 
 		/*
 		 * We don't acquire a lock on the namespace system table as we build
@@ -2103,6 +2204,11 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		bool		am_partition = get_rel_relispartition(relid);
 		char		relkind = get_rel_relkind(relid);
 		List	   *rel_publications = NIL;
+		bool		root_published_via_alltables = false;
+		Oid			root_ancestor = InvalidOid;
+		List	   *ancestors = NIL;
+
+		GetRelationPublications(relid, &pubids, NULL);
 
 		/* Reload publications if needed before use. */
 		if (!publications_valid)
@@ -2182,6 +2288,33 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		memset(entry->exprstate, 0, sizeof(entry->exprstate));
 
 		/*
+		 * For partitions, pre-determine if the top-most ancestor is covered
+		 * by any 'FOR ALL TABLES' publication that uses
+		 * 'publish_via_partition_root' and an 'EXCEPT' clause.
+		 *
+		 * This pre-calculation is vital for resolving overlap conflicts: if a
+		 * partition is excluded globally via an EXCEPT clause but included
+		 * explicitly elsewhere (table/schema level), it must still be routed
+		 * via the root identity if that root is published.
+		 */
+		if (am_partition)
+		{
+			ancestors = get_partition_ancestors(relid);
+			root_ancestor = llast_oid(ancestors);
+
+			foreach_ptr(Publication, pubinfo, data->publications)
+			{
+				if (pubinfo->alltables && pubinfo->pubviaroot &&
+					publication_has_publishable_partitions(root_ancestor,
+														   pubinfo->oid))
+				{
+					root_published_via_alltables = true;
+					break;
+				}
+			}
+		}
+
+		/*
 		 * Build publication cache. We can't use one provided by relcache as
 		 * relcache considers all publications that the given relation is in,
 		 * but here we only need to consider ones that the subscriber
@@ -2203,20 +2336,42 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 			/*
 			 * If this is a FOR ALL TABLES publication, pick the partition
 			 * root and set the ancestor level accordingly.
+			 *
+			 * If this is a FOR ALL TABLES publication and it has an EXCEPT
+			 * TABLE list:
+			 *
+			 * If the relation is a partition, check whether the current
+			 * relation or any of the ancestors is included in the EXCEPT
+			 * TABLE list. If so, do not publish the change.
+			 *
+			 * "Do not publish the change" is achieved by keeping the variable
+			 * "publish" set to false. And eventually, entry->pubactions will
+			 * remain all false for this publication.
 			 */
 			if (pub->alltables)
 			{
-				publish = true;
-				if (pub->pubviaroot && am_partition)
+				List	   *exceptpubids = NIL;
+
+				if (am_partition)
 				{
-					List	   *ancestors = get_partition_ancestors(relid);
+					foreach_oid(ancestor, ancestors)
+						GetRelationPublications(ancestor, NULL, &exceptpubids);
 
-					pub_relid = llast_oid(ancestors);
-					ancestor_level = list_length(ancestors);
+					if (pub->pubviaroot)
+					{
+						pub_relid = root_ancestor;
+						ancestor_level = list_length(ancestors);
+					}
 				}
-			}
 
-			if (!publish)
+				GetRelationPublications(relid, NULL, &exceptpubids);
+
+				if (!list_member_oid(exceptpubids, pub->oid))
+					publish = true;
+
+				list_free(exceptpubids);
+			}
+			else if (!publish)
 			{
 				bool		ancestor_published = false;
 
@@ -2230,12 +2385,10 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 				{
 					Oid			ancestor;
 					int			level;
-					List	   *ancestors = get_partition_ancestors(relid);
 
 					ancestor = GetTopMostAncestorInPublication(pub->oid,
 															   ancestors,
 															   &level);
-
 					if (ancestor != InvalidOid)
 					{
 						ancestor_published = true;
@@ -2250,7 +2403,25 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 				if (list_member_oid(pubids, pub->oid) ||
 					list_member_oid(schemaPubids, pub->oid) ||
 					ancestor_published)
+				{
+					/*
+					 * If the root ancestor is effectively published by an ALL
+					 * TABLES publication with publish_via_partition_root,
+					 * then changes for its partitions must be published using
+					 * the root identity.
+					 *
+					 * This applies even if other publications do not specify
+					 * publish_via_partition_root, provided the root is not
+					 * excluded from that ALL TABLES publication.
+					 */
+					if (root_published_via_alltables)
+					{
+						pub_relid = root_ancestor;
+						ancestor_level = list_length(ancestors);
+					}
+
 					publish = true;
+				}
 			}
 
 			/*
@@ -2297,6 +2468,17 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 					/* Same ancestor level, has to be the same OID. */
 					Assert(publish_as_relid == pub_relid);
 				}
+
+				/*
+				 * Partitions whose top-most ancestor is being published via
+				 * an 'ALL TABLES' publication need not be individually
+				 * published via any other publication. Repeated occurrences
+				 * of a partition take the least restricted definition, which
+				 * the 'ALL TABLES' publication always provides. I.e., all
+				 * columns and all rows.
+				 */
+				if (root_published_via_alltables)
+					continue;
 
 				/* Track publications for this ancestor. */
 				rel_publications = lappend(rel_publications, pub);

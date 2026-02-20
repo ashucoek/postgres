@@ -4623,9 +4623,55 @@ getPublications(Archive *fout)
 			(strcmp(PQgetvalue(res, i, i_pubviaroot), "t") == 0);
 		pubinfo[i].pubgencols_type =
 			*(PQgetvalue(res, i, i_pubgencols));
+		pubinfo[i].except_tables = (SimplePtrList)
+		{
+			NULL, NULL
+		};
 
 		/* Decide whether we want to dump it */
 		selectDumpableObject(&(pubinfo[i].dobj), fout);
+
+		/*
+		 * Get the list of tables for publications specified with the EXCEPT
+		 * TABLE clause. This is introduced in PostgreSQL 19.
+		 *
+		 * EXCEPT TABLES is processed here and output directly by
+		 * dumpPublication(). This differs from the approach used in
+		 * dumpPublicationTable() and dumpPublicationNamespace(), since that
+		 * approach would require EXCEPT TABLE support for ALTER PUBLICATION,
+		 * which is not currently supported.
+		 */
+		if (fout->remoteVersion >= 190000)
+		{
+			int			ntbls;
+			PGresult   *res_tbls;
+
+			resetPQExpBuffer(query);
+			appendPQExpBuffer(query,
+							  "SELECT prrelid\n"
+							  "FROM pg_catalog.pg_publication_rel\n"
+							  "WHERE prpubid = %u and prexcept",
+							  pubinfo[i].dobj.catId.oid);
+
+			res_tbls = ExecuteSqlQuery(fout, query->data, PGRES_TUPLES_OK);
+
+			ntbls = PQntuples(res_tbls);
+
+			for (int j = 0; j < ntbls; j++)
+			{
+				Oid			prrelid;
+				TableInfo  *tbinfo;
+
+				prrelid = atooid(PQgetvalue(res_tbls, j, 0));
+
+				tbinfo = findTableByOid(prrelid);
+
+				if (tbinfo != NULL)
+					simple_ptr_list_append(&pubinfo[i].except_tables, tbinfo);
+			}
+
+			PQclear(res_tbls);
+		}
 	}
 
 cleanup:
@@ -4665,7 +4711,25 @@ dumpPublication(Archive *fout, const PublicationInfo *pubinfo)
 	if (pubinfo->puballtables && pubinfo->puballsequences)
 		appendPQExpBufferStr(query, " FOR ALL TABLES, ALL SEQUENCES");
 	else if (pubinfo->puballtables)
+	{
+		int			n_except = 0;
+
 		appendPQExpBufferStr(query, " FOR ALL TABLES");
+
+		/* Include EXCEPT TABLE clause if there are except_tables. */
+		for (SimplePtrListCell *cell = pubinfo->except_tables.head; cell; cell = cell->next)
+		{
+			TableInfo  *tbinfo = (TableInfo *) cell->ptr;
+
+			if (++n_except == 1)
+				appendPQExpBufferStr(query, " EXCEPT TABLE (");
+			else
+				appendPQExpBufferStr(query, ", ");
+			appendPQExpBuffer(query, "ONLY %s", fmtQualifiedDumpable(tbinfo));
+		}
+		if (n_except > 0)
+			appendPQExpBufferStr(query, ")");
+	}
 	else if (pubinfo->puballsequences)
 		appendPQExpBufferStr(query, " FOR ALL SEQUENCES");
 
@@ -4845,6 +4909,7 @@ getPublicationTables(Archive *fout, TableInfo tblinfo[], int numTables)
 
 	/* Collect all publication membership info. */
 	if (fout->remoteVersion >= 150000)
+	{
 		appendPQExpBufferStr(query,
 							 "SELECT tableoid, oid, prpubid, prrelid, "
 							 "pg_catalog.pg_get_expr(prqual, prrelid) AS prrelqual, "
@@ -4857,6 +4922,9 @@ getPublicationTables(Archive *fout, TableInfo tblinfo[], int numTables)
 							 "      WHERE attrelid = pr.prrelid AND attnum = prattrs[s])\n"
 							 "  ELSE NULL END) prattrs "
 							 "FROM pg_catalog.pg_publication_rel pr");
+		if (fout->remoteVersion >= 190000)
+			appendPQExpBufferStr(query, " WHERE NOT pr.prexcept");
+	}
 	else
 		appendPQExpBufferStr(query,
 							 "SELECT tableoid, oid, prpubid, prrelid, "

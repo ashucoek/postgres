@@ -550,6 +550,111 @@ check_publications(WalReceiverConn *wrconn, List *publications)
 }
 
 /*
+ * ERROR if multiple publications with EXCEPT clauses are present.
+ *
+ * Logical replication does not support subscribing to more than one
+ * publication that defines an exclusion list. Allowing this would
+ * create ambiguous and unpredictable replication behavior.
+ *
+ * The ambiguity arises when publications differ in their exclusions
+ * and in the setting of 'publish_via_partition_root'. In such cases,
+ * the effective publication set cannot be determined consistently:
+ *
+ *   - Tables excluded in one publication may be implicitly included
+ *     in another.
+ *   - Conflicting 'publish_via_partition_root' settings alter how
+ *     partitions are represented and deduplicated.
+ *
+ * To avoid these conflicts, a subscription may include at most one
+ * 'FOR ALL TABLES' publication that specifies an EXCEPT clause.
+ *
+ * Example:
+ *
+ *   Partitioned table: tab_root
+ *   Partitions: part1, part2, part3
+ *
+ *   pub1:
+ *     FOR ALL TABLES EXCEPT (part1, part2)
+ *       WITH (publish_via_partition_root = true)
+ *
+ *   pub2:
+ *     FOR ALL TABLES EXCEPT (part3)
+ *       WITH (publish_via_partition_root = false)
+ *
+ * Subscribing to both pub1 and pub2 is invalid because:
+ *   - pub1 excludes part1 and part2, publishing remaining partitions
+ *     via the root.
+ *   - pub2 excludes part3, publishing other partitions individually.
+ *
+ * The resulting publication set is ambiguous and provides no clear
+ * benefit. Unless all publications exclude the same tables, combining
+ * them introduces complex and conflicting partition resolution rules.
+ */
+static void
+check_publications_except_list(WalReceiverConn *wrconn, List *publications)
+{
+	List	   *except_publications = NIL;
+	WalRcvExecResult *res;
+	StringInfoData cmd;
+	StringInfoData pubnames;
+	TupleTableSlot *slot;
+	Oid			tableRow[1] = {TEXTOID};
+
+	if (list_length(publications) <= 1)
+		return;
+
+	initStringInfo(&cmd);
+	appendStringInfoString(&cmd,
+						   "SELECT p.pubname\n"
+						   " FROM pg_catalog.pg_publication p\n"
+						   " WHERE p.pubname IN (");
+
+	GetPublicationsStr(publications, &cmd, true);
+
+	appendStringInfoString(&cmd,
+						   ")\n"
+						   "   AND EXISTS (SELECT 1\n"
+						   "                 FROM pg_catalog.pg_publication_rel pr\n"
+						   "                WHERE pr.prpubid = p.oid\n"
+						   "                  AND pr.prexcept IS TRUE)");
+
+	res = walrcv_exec(wrconn, cmd.data, 1, tableRow);
+	pfree(cmd.data);
+
+	if (res->status != WALRCV_OK_TUPLES)
+		ereport(ERROR,
+				errmsg("could not receive list of publications from the publisher: %s",
+					   res->err));
+
+	slot = MakeSingleTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple);
+	while (tuplestore_gettupleslot(res->tuplestore, true, false, slot))
+	{
+		char	   *pubname;
+		bool		isnull;
+
+		pubname = TextDatumGetCString(slot_getattr(slot, 1, &isnull));
+		Assert(!isnull);
+
+		except_publications = lappend(except_publications, makeString(pubname));
+		ExecClearTuple(slot);
+	}
+
+	ExecDropSingleTupleTableSlot(slot);
+
+	walrcv_clear_result(res);
+
+	if (list_length(except_publications) <= 1)
+		return;
+
+	initStringInfo(&pubnames);
+	GetPublicationsStr(except_publications, &pubnames, false);
+
+	ereport(ERROR,
+			errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+			errmsg("cannot combine publications %s with EXCEPT TABLE clauses", pubnames.data));
+}
+
+/*
  * Auxiliary function to build a text array out of a list of String nodes.
  */
 static Datum
@@ -795,6 +900,7 @@ CreateSubscription(ParseState *pstate, CreateSubscriptionStmt *stmt,
 			char		relation_state;
 
 			check_publications(wrconn, publications);
+			check_publications_except_list(wrconn, publications);
 			check_publications_origin_tables(wrconn, publications,
 											 opts.copy_data,
 											 opts.retaindeadtuples, opts.origin,
@@ -958,6 +1064,8 @@ AlterSubscription_refresh(Subscription *sub, bool copy_data,
 	{
 		if (validate_publications)
 			check_publications(wrconn, validate_publications);
+
+		check_publications_except_list(wrconn, sub->publications);
 
 		/* Get the relation list from publisher. */
 		pubrels = fetch_relation_list(wrconn, sub->publications);
@@ -2940,6 +3048,8 @@ fetch_relation_list(WalReceiverConn *wrconn, List *publications)
 						 pub_names.data);
 	}
 
+	elog(LOG, "fetch_relation_list: executing query to fetch effective relations: \n%s",
+		 cmd.data);
 	pfree(pub_names.data);
 
 	res = walrcv_exec(wrconn, cmd.data, column_count, tableRow);

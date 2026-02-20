@@ -2421,6 +2421,7 @@ QTNode
 QUERYTYPE
 QualCost
 QualItem
+QualifiedRelationName
 Query
 QueryCompletion
 QueryDesc
