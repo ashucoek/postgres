@@ -641,6 +641,7 @@ extern void pgstat_lock_flush(bool nowait);
 extern void pgstat_count_lock_waits(uint8 locktag_type);
 extern void pgstat_count_lock_fastpath_exceeded(uint8 locktag_type);
 extern void pgstat_count_lock_timed_wait(uint8 locktag_type, long msecs);
+extern PgStat_Lock *pgstat_fetch_stat_lock(void);
 
 /*
  * Functions in pgstat_database.c

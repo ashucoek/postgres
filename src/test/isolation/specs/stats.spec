@@ -130,6 +130,14 @@ step s1_slru_check_stats {
   WHERE before.stat = 'blks_zeroed';
 	}
 
+# Lock stats steps
+step s1_set_deadlock_timeout { SET deadlock_timeout = '10ms'; }
+step s1_set_log_lock_waits { SET log_lock_waits = on; }
+step s1_reset_stat_lock { SELECT pg_stat_reset_shared('lock'); }
+step s1_sleep { SELECT pg_sleep(0.5); }
+step s1_lock_relation { LOCK TABLE test_stat_tab; }
+step s1_lock_advisory_lock { SELECT pg_advisory_lock(1); }
+step s1_lock_advisory_unlock { SELECT pg_advisory_unlock(1); }
 
 session s2
 setup { SET stats_fetch_consistency = 'none'; }
@@ -164,6 +172,16 @@ step s2_big_notify { SELECT pg_notify('stats_test_use',
                 repeat(i::text, current_setting('block_size')::int / 2)) FROM generate_series(1, 3) g(i);
                 }
 
+# Lock stats steps
+step s2_set_deadlock_timeout { SET deadlock_timeout = '10ms'; }
+step s2_set_log_lock_waits { SET log_lock_waits = on; }
+step s2_unset_log_lock_waits { SET log_lock_waits = off; }
+step s2_report_stat_lock_relation { SELECT waits > 0, timed_waits = waits, wait_time > 500 FROM pg_stat_lock WHERE locktype = 'relation'; }
+step s2_report_stat_lock_transactionid { SELECT waits > 0, timed_waits = waits, wait_time > 500 FROM pg_stat_lock WHERE locktype = 'transactionid'; }
+step s2_report_stat_lock_advisory { SELECT waits > 0, timed_waits = waits, wait_time > 500 FROM pg_stat_lock WHERE locktype = 'advisory'; }
+step s2_lock_relation { LOCK TABLE test_stat_tab; }
+step s2_lock_advisory_lock { SELECT pg_advisory_lock(1); }
+step s2_lock_advisory_unlock { SELECT pg_advisory_unlock(1); }
 
 ######################
 # Function stats tests
@@ -765,3 +783,80 @@ permutation
   s1_clear_snapshot
   s1_func_stats
   s1_commit
+
+######################
+# Lock stats tests
+######################
+
+# relation lock
+
+permutation
+  s1_set_deadlock_timeout
+  s1_reset_stat_lock
+  s1_set_log_lock_waits
+  s2_set_deadlock_timeout
+  s2_set_log_lock_waits
+  s1_begin
+  s1_lock_relation
+  s2_begin
+  s2_ff
+  s2_lock_relation
+  s1_sleep
+  s1_commit
+  s2_commit
+  s2_report_stat_lock_relation
+
+# transaction lock
+
+permutation
+  s1_set_deadlock_timeout
+  s1_reset_stat_lock
+  s1_set_log_lock_waits
+  s2_set_deadlock_timeout
+  s2_set_log_lock_waits
+  s1_table_insert
+  s1_begin
+  s1_table_update_k1
+  s2_begin
+  s2_ff
+  s2_table_update_k1
+  s1_sleep
+  s1_commit
+  s2_commit
+  s2_report_stat_lock_transactionid
+
+# advisory lock
+
+permutation
+  s1_set_deadlock_timeout
+  s1_reset_stat_lock
+  s1_set_log_lock_waits
+  s2_set_deadlock_timeout
+  s2_set_log_lock_waits
+  s1_lock_advisory_lock
+  s2_begin
+  s2_ff
+  s2_lock_advisory_lock
+  s1_sleep
+  s1_lock_advisory_unlock
+  s2_lock_advisory_unlock
+  s2_commit
+  s2_report_stat_lock_advisory
+
+# Ensure log_lock_waits behaves correctly
+
+permutation
+  s1_set_deadlock_timeout
+  s1_reset_stat_lock
+  s1_set_log_lock_waits
+  s2_set_deadlock_timeout
+  s2_unset_log_lock_waits
+  s1_begin
+  s1_lock_relation
+  s2_begin
+  s2_ff
+  s2_lock_relation
+  s1_sleep
+  s1_commit
+  s2_commit
+  s2_report_stat_lock_relation
