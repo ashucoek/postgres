@@ -152,5 +152,7 @@ extern XLogRecPtr LogicalReplicationSlotCheckPendingWal(XLogRecPtr end_of_wal,
 														XLogRecPtr scan_cutoff_lsn);
 extern XLogRecPtr LogicalSlotAdvanceAndCheckSnapState(XLogRecPtr moveto,
 													  bool *found_consistent_snapshot);
+extern void GetPublicationsStr(List *publications, StringInfo dest,
+							   bool quote_literal);
 
 #endif

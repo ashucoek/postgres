@@ -8688,7 +8688,7 @@ ATExecSetExpression(AlteredTableInfo *tab, Relation rel, const char *colName,
 	 * expressions.
 	 */
 	if (attgenerated == ATTRIBUTE_GENERATED_VIRTUAL &&
-		GetRelationPublications(RelationGetRelid(rel)) != NIL)
+		GetRelationPublications(RelationGetRelid(rel), NULL, NULL))
 		ereport(ERROR,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("ALTER TABLE / SET EXPRESSION is not supported for virtual generated columns in tables that are part of a publication"),
@@ -18884,7 +18884,7 @@ ATPrepChangePersistence(AlteredTableInfo *tab, Relation rel, bool toLogged)
 	 * UNLOGGED, as UNLOGGED tables can't be published.
 	 */
 	if (!toLogged &&
-		GetRelationPublications(RelationGetRelid(rel)) != NIL)
+		GetRelationPublications(RelationGetRelid(rel), NULL, NULL))
 		ereport(ERROR,
 				(errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
 				 errmsg("cannot change table \"%s\" to unlogged because it is part of a publication",
