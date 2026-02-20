@@ -178,6 +178,54 @@ $node_publisher->safe_psql('postgres',
 	"SELECT slot_name FROM pg_replication_slot_advance('test_slot', pg_current_wal_lsn());"
 );
 
+# Excluding one of the partitions (part2) should not affect replication of the
+# other partitions that don't intersect it. So, in this case, all of part1
+# should still be replicated.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	TRUNCATE sch1.t1;
+	INSERT INTO sch1.t1 VALUES (3), (103), (153);
+	CREATE PUBLICATION tap_pub_part FOR ALL TABLES EXCEPT TABLE (sch1.part2) WITH (publish_via_partition_root = true);
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	TRUNCATE sch1.t1;
+	CREATE SUBSCRIPTION tap_sub_part CONNECTION '$publisher_connstr' PUBLICATION tap_pub_part;
+));
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_part');
+$node_publisher->safe_psql('postgres',
+	"SELECT slot_name FROM pg_replication_slot_advance('test_slot', pg_current_wal_lsn());"
+);
+
+# Verify that data inserted to the partition part2 is not published when it
+# is in the EXCEPT clause
+$result = $node_publisher->safe_psql('postgres',
+	"SELECT count(*) = 0 FROM pg_logical_slot_get_binary_changes('test_slot', NULL, NULL, 'proto_version', '1', 'publication_names', 'tap_pub_part')"
+);
+$node_publisher->wait_for_catchup('tap_sub_part');
+
+# Check that table data 103 and 153 which is present in sch1.part2 should
+# not be replicated.
+$result = $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.t1");
+is($result, qq(3), 'check rows on root table');
+
+$result = $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.part1");
+is($result, qq(), 'check rows on table sch1.part1');
+
+$result = $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.part2");
+is($result, qq(), 'check rows on table sch1.part2');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.part2_1");
+is($result, qq(), 'check rows on table sch1.part2_1');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.part2_2");
+is($result, qq(), 'check rows on table sch1.part2_2');
+
+$node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_part");
+$node_publisher->safe_psql('postgres', "DROP PUBLICATION tap_pub_part;");
+
 # ============================================
 # Test when a subscription is subscribing to multiple publications
 # ============================================
@@ -265,11 +313,51 @@ like(
 	$stderr,
 	qr/ERROR:  cannot combine publications that define EXCEPT TABLE clauses.*
 .*DETAIL:.*The following publications define EXCEPT TABLE clauses: "tap_pub1", "tap_pub2"./,
-	'subscription with multiple EXCEPT TABLE publication');
+	'subscription with multiple EXCEPT TABLE publication');	
 
 $node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION tap_sub');
 $node_publisher->safe_psql('postgres', 'DROP PUBLICATION tap_pub1');
 $node_publisher->safe_psql('postgres', 'DROP PUBLICATION tap_pub2');
+
+# ============================================
+# Test multi-publication subscription where a table listed in the
+# EXCEPT clause of one publication is included by another publication
+# ============================================
+$node_publisher->safe_psql(
+	'postgres', qq(
+	TRUNCATE TABLE sch1.t1;
+	CREATE PUBLICATION tap_pub_part1 FOR ALL TABLES EXCEPT TABLE (sch1.part2_1) WITH (publish_via_partition_root = true);
+	CREATE PUBLICATION tap_pub_part2 FOR TABLE sch1.part2_1 WHERE (a > 110) WITH (publish_via_partition_root = true);
+	INSERT INTO sch1.t1 VALUES (11), (111), (161);
+));
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	TRUNCATE TABLE sch1.t1, sch1.part1, sch1.part2, sch1.part2_1, sch1.part2_2;
+	CREATE SUBSCRIPTION tap_sub_part CONNECTION '$publisher_connstr' PUBLICATION tap_pub_part1, tap_pub_part2;
+));
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub_part');
+
+# Verify that rows for sch1.part2_1 are replicated because the table, although
+# listed in the EXCEPT clause of tap_pub_part1, is included by tap_pub_part2.
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.t1 ORDER BY 1");
+is( $result, qq(11
+111
+161), 'initial rows replicated to root table');
+
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO sch1.t1 VALUES (12), (112), (162);");
+
+$node_publisher->wait_for_catchup('tap_sub_part');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT * FROM sch1.t1 ORDER BY 1");
+is( $result, qq(11
+12
+111
+112
+161
+162), 'subsequent rows replicated to root table');
 
 $node_publisher->stop('fast');
 

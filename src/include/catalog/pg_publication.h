@@ -190,6 +190,7 @@ extern Oid	GetTopMostAncestorInPublication(Oid puboid, List *ancestors,
 
 extern bool is_publishable_relation(Relation rel);
 extern bool is_schema_publication(Oid pubid);
+extern bool is_relid_excepted(Oid relid, Oid pubid);
 extern bool publication_has_any_except_table(Oid pubid);
 extern bool check_and_fetch_column_list(Publication *pub, Oid relid,
 										MemoryContext mcxt, Bitmapset **cols);

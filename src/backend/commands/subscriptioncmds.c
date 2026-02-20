@@ -3096,6 +3096,8 @@ fetch_relation_list(WalReceiverConn *wrconn, List *publications)
 						 pub_names.data);
 	}
 
+	elog(LOG, "fetch_relation_list: executing query to fetch effective relations: \n%s",
+		 cmd.data);
 	pfree(pub_names.data);
 
 	res = walrcv_exec(wrconn, cmd.data, column_count, tableRow);
