@@ -209,7 +209,4 @@ extern void DisableSubscription(Oid subid);
 
 extern int	CountDBSubscriptions(Oid dbid);
 
-extern void GetPublicationsStr(List *publications, StringInfo dest,
-							   bool quote_literal);
-
 #endif							/* PG_SUBSCRIPTION_H */
