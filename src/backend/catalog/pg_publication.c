@@ -472,11 +472,6 @@ publication_add_relation(Oid pubid, PublicationRelInfo *pri,
 						RelationGetRelationName(targetrel), pub->name)));
 	}
 
-	if (pub->alltables && pri->except && targetrel->rd_rel->relispartition)
-		ereport(ERROR,
-				errmsg("partition \"%s\" cannot be excluded using EXCEPT TABLE",
-					   RelationGetRelationName(targetrel)));
-
 	check_publication_add_relation(targetrel, pri);
 
 	/* Validate and translate column names into a Bitmapset of attnums. */
@@ -925,6 +920,52 @@ GetAllTablesPublications(void)
 }
 
 /*
+ * Returns true if the given partitioned table is effectively excluded
+ * by the EXCEPT list.
+ *
+ * A partitioned table is considered excluded if:
+ *  1) It is explicitly present in excepted_relids, or
+ *  2) All of its leaf partitions are present in excepted_relids.
+ */
+static bool
+partitioned_rel_is_effectively_excluded(Oid relid, List *excepted_relids)
+{
+	List	   *leaftables = NIL;
+
+	Assert(get_rel_relkind(relid) == RELKIND_PARTITIONED_TABLE &&
+		   !get_rel_relispartition(relid));
+
+	if (excepted_relids == NIL)
+		return false;
+
+	/* Explicitly excluded */
+	if (list_member_oid(excepted_relids, relid))
+		return true;
+
+	/* Get all leaf partitions of relid */
+	leaftables = GetPubPartitionOptionRelations(leaftables,
+												PUBLICATION_PART_LEAF,
+												relid);
+
+	/*
+	 * If any leaf is NOT present in excepted_relids, then the partitioned
+	 * table is not fully excluded.
+	 */
+	foreach_oid(leafrelid, leaftables)
+	{
+		if (!list_member_oid(excepted_relids, leafrelid))
+		{
+			pfree(leaftables);
+			return false;
+		}
+	}
+	pfree(leaftables);
+
+	/* All leaves are excluded */
+	return true;
+}
+
+/*
  * Gets list of all relations published by FOR ALL TABLES/SEQUENCES
  * publication.
  *
@@ -952,7 +993,7 @@ GetAllPublicationRelations(Publication *pub, char relkind)
 
 	if (relkind == RELKIND_RELATION)
 		exceptlist = GetExcludedPublicationTables(pubid, pubviaroot ?
-												  PUBLICATION_PART_ROOT :
+												  PUBLICATION_PART_ALL :
 												  PUBLICATION_PART_LEAF);
 
 	classRel = table_open(RelationRelationId, AccessShareLock);
@@ -993,7 +1034,7 @@ GetAllPublicationRelations(Publication *pub, char relkind)
 
 			if (is_publishable_class(relid, relForm) &&
 				!relForm->relispartition &&
-				!list_member_oid(exceptlist, relid))
+				!partitioned_rel_is_effectively_excluded(relid, exceptlist))
 				result = lappend_oid(result, relid);
 		}
 
@@ -1240,6 +1281,424 @@ publication_has_any_except_table(Oid pubid)
 	table_close(pubrelsrel, AccessShareLock);
 
 	return found;
+}
+
+/* is_relid_excepted
+ *
+ * Check if the relation 'relid' is explicitly specified in the EXCEPT clause
+ * of the given publication.
+ */
+bool
+is_relid_excepted(Oid relid, Oid pubid)
+{
+	HeapTuple	tup;
+	bool		result = false;
+
+	tup = SearchSysCache2(PUBLICATIONRELMAP, ObjectIdGetDatum(relid),
+						  ObjectIdGetDatum(pubid));
+	if (HeapTupleIsValid(tup))
+	{
+		Form_pg_publication_rel prform;
+
+		prform = (Form_pg_publication_rel) GETSTRUCT(tup);
+		result = prform->prexcept;
+
+		ReleaseSysCache(tup);
+	}
+	return result;
+}
+
+/*
+ * is_relid_or_ancestor_excepted
+ *
+ * Check if the relation 'relid' or any of its partition ancestors are
+ * explicitly specified in the EXCEPT clause of the given publication.
+ */
+static bool
+is_relid_or_ancestor_excepted(Oid relid, Oid pubid)
+{
+	List	   *ancestors;
+	bool		in_except = false;
+
+	Assert(get_rel_relispartition(relid) &&
+		   !RELKIND_HAS_PARTITIONS(get_rel_relkind(relid)));
+
+	/* Check the relation itself first */
+	if (is_relid_excepted(relid, pubid))
+		return true;
+
+	/* Check if any ancestors are in the EXCEPT list. */
+	ancestors = get_partition_ancestors(relid);
+
+	foreach_oid(ancestor, ancestors)
+	{
+		if (is_relid_excepted(ancestor, pubid))
+		{
+			in_except = true;
+			break;
+		}
+	}
+
+	list_free(ancestors);
+
+	return in_except;
+}
+
+/*
+ * is_relid_published
+ *
+ * Check whether a given table or its schema is included in the specified
+ * publication.
+ */
+static bool
+is_relid_published(Oid relid, Oid pubid)
+{
+	HeapTuple	tup;
+
+	tup = SearchSysCache2(PUBLICATIONRELMAP, ObjectIdGetDatum(relid),
+						  ObjectIdGetDatum(pubid));
+	if (HeapTupleIsValid(tup))
+	{
+		bool		published = false;
+		Form_pg_publication_rel prform;
+
+		prform = (Form_pg_publication_rel) GETSTRUCT(tup);
+		published = !prform->prexcept;
+
+		ReleaseSysCache(tup);
+
+		if (published)
+			return true;
+	}
+
+	return SearchSysCacheExists2(PUBLICATIONNAMESPACEMAP,
+								 ObjectIdGetDatum(get_rel_namespace(relid)),
+								 ObjectIdGetDatum(pubid));
+}
+
+/*
+ * is_relid_or_ancestor_published
+ *
+ * Check whether a given table or its schema or any of its partition ancestors,
+ * or its schema included in the specified publication
+ */
+static bool
+is_relid_or_ancestor_published(Oid relid, Oid pubid)
+{
+	if (is_relid_published(relid, pubid))
+		return true;
+	else
+	{
+		List	   *ancestors = get_partition_ancestors(relid);
+
+		foreach_oid(anc_oid, ancestors)
+		{
+			if (is_relid_published(anc_oid, pubid))
+				return true;
+		}
+	}
+
+	return false;
+}
+
+/*
+ * pg_get_publication_effective_tables
+ *
+ * Given a root partitioned table and a list of publications, calculate the set
+ * of relations that are effectively published. This is necessary for
+ * "FOR ALL TABLES" publications that use "EXCEPT TABLE" filters.
+ *
+ * The function returns a minimal set of relations that collectively
+ * include all non-excluded leaf partitions in the partition hierarchy.
+ */
+Datum
+pg_get_publication_effective_tables(PG_FUNCTION_ARGS)
+{
+	FuncCallContext *funcctx;
+	List	   *results;
+
+	if (SRF_IS_FIRSTCALL())
+	{
+		Oid			root_relid = PG_GETARG_OID(0);
+		ArrayType  *pub_names_array = PG_GETARG_ARRAYTYPE_P(1);
+		MemoryContext oldcontext;
+		List	   *pub_oids = NIL;
+		Datum	   *pub_datums;
+		bool	   *pub_nulls;
+		int			pub_count;
+		TupleDesc	tupdesc;
+		List	   *final_output = NIL;
+		bool		has_clean_all_tables_pub = false;
+		List	   *except_pub_names = NIL;
+		Oid			except_pub_id = InvalidOid;
+		HeapTuple	tuple;
+
+		funcctx = SRF_FIRSTCALL_INIT();
+
+		deconstruct_array(pub_names_array, TEXTOID, -1, false, 'i',
+						  &pub_datums, &pub_nulls, &pub_count);
+
+		/* Build the list of pub_oids */
+		for (int i = 0; i < pub_count; i++)
+		{
+			if (!pub_nulls[i])
+			{
+				char	   *pubname = TextDatumGetCString(pub_datums[i]);
+
+				pub_oids = lappend_oid(pub_oids, get_publication_oid(pubname, false));
+			}
+		}
+
+		/*
+		 * Determine whether the expensive expansion step can be skipped. If
+		 * any publication is a FOR ALL TABLES publication without an EXCEPT
+		 * clause, the root relation alone is sufficient as the result.
+		 */
+		foreach_oid(puboid, pub_oids)
+		{
+			HeapTuple	pubTup;
+			Form_pg_publication pubform;
+
+			pubTup = SearchSysCache1(PUBLICATIONOID, ObjectIdGetDatum(puboid));
+			if (!HeapTupleIsValid(pubTup))
+				continue;
+
+			pubform = (Form_pg_publication) GETSTRUCT(pubTup);
+			if (pubform->puballtables)
+			{
+				/* Check whether this publication defines any EXCEPT entries */
+				if (publication_has_any_except_table(puboid))
+				{
+					except_pub_names = lappend(except_pub_names,
+											   makeString(pubform->pubname.data));
+					except_pub_id = pubform->oid;
+				}
+				else
+				{
+					/* Publication is FOR ALL TABLES with no EXCEPT clause. */
+					has_clean_all_tables_pub = true;
+				}
+			}
+
+			ReleaseSysCache(pubTup);
+		}
+
+		if (list_length(except_pub_names) > 1)
+		{
+			StringInfo	pub_names = makeStringInfo();
+
+			GetPublicationsStr(except_pub_names, pub_names, true);
+			ereport(ERROR,
+					errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+					errmsg("cannot combine publications that define EXCEPT TABLE clauses"),
+					errdetail("The following publications define EXCEPT TABLE clauses: %s.",
+							  pub_names->data));
+		}
+
+
+		tuple = SearchSysCache1(RELOID, ObjectIdGetDatum(root_relid));
+		if (!HeapTupleIsValid(tuple))
+			ereport(ERROR,
+					(errcode(ERRCODE_UNDEFINED_TABLE),
+					 errmsg("relation with OID %u does not exist", root_relid)));
+
+		ReleaseSysCache(tuple);
+
+		/* Return root immediately if no filtering logic is needed */
+		if (has_clean_all_tables_pub || !OidIsValid(except_pub_id) ||
+			get_rel_relkind(root_relid) != RELKIND_PARTITIONED_TABLE)
+		{
+			oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+			final_output = list_make1_oid(root_relid);
+			MemoryContextSwitchTo(oldcontext);
+		}
+
+		/*
+		 * Build the effective publication relation list for a partitioned
+		 * hierarchy in the presence of an EXCEPT publication.
+		 *
+		 * 1. Collect all leaf partitions under the given root relation.
+		 *
+		 * 2. Classify each leaf as either: - excepted_leaves: explicitly
+		 * excluded via the EXCEPT clause (either directly or through any of
+		 * its ancestors), or - allowed_leaves: not excluded and therefore
+		 * part of the effective publication set.
+		 *
+		 * 3. Re-evaluate excluded leaves against other publications. A leaf
+		 * excluded in one publication may still be effectively included if it
+		 * (or any of its ancestors, or its schema) is published through
+		 * another publication. Such leaves are added back to allowed_leaves.
+		 *
+		 * 4. Bottom-up collapse of partition branches. For each partitioned
+		 * table in the hierarchy: - If *all* of its leaf partitions are
+		 * present in allowed_leaves, the parent can represent the entire
+		 * branch. - Such parents are added as candidates, allowing
+		 * higher-level representation instead of listing every leaf
+		 * individually.
+		 *
+		 * 5. Deduplicate and normalize the result. Remove any relation whose
+		 * ancestor is already selected as a candidate. This ensures the final
+		 * output contains only the highest-level representative for each
+		 * fully-allowed branch and avoids redundant entries.
+		 *
+		 * The final_output therefore contains a minimal, non-redundant set of
+		 * relations that accurately represents the effective publication set
+		 * after considering EXCEPT rules and multiple publications.
+		 */
+		else
+		{
+			List	   *all_tables;
+			List	   *all_leaves = NIL;
+			List	   *excepted_leaves = NIL;
+			List	   *allowed_leaves = NIL;
+			List	   *candidate_list = NIL;
+
+			/* Get all the leaf relations */
+			all_leaves = GetPubPartitionOptionRelations(all_leaves,
+														PUBLICATION_PART_LEAF,
+														root_relid);
+			foreach_oid(curr_relid, all_leaves)
+			{
+				/*
+				 * A leaf table is considered excluded if it, or any of its
+				 * ancestors, is listed in the EXCEPT clause of the
+				 * publication. Otherwise, it remains part of the effective
+				 * publication set.
+				 */
+				if (is_relid_or_ancestor_excepted(curr_relid, except_pub_id))
+				{
+					bool		published_by_other_pub = false;
+
+					/*
+					 * A table excluded by the EXCEPT clause of one
+					 * publication may still be included if it is explicitly
+					 * published, or published via its schema or any of its
+					 * ancestors, in another publication.
+					 */
+					foreach_oid(pubid, pub_oids)
+					{
+						/*
+						 * Skip the publication that lists this relation in
+						 * its EXCEPT list. At most one such publication can
+						 * exist, as enforced earlier.
+						 */
+						if (pubid == except_pub_id)
+							continue;
+
+						if (is_relid_or_ancestor_published(curr_relid, pubid))
+						{
+							allowed_leaves = lappend_oid(allowed_leaves, curr_relid);
+							published_by_other_pub = true;
+							break;
+						}
+					}
+
+					if (!published_by_other_pub)
+						excepted_leaves = lappend_oid(excepted_leaves, curr_relid);
+				}
+				else
+					allowed_leaves = lappend_oid(allowed_leaves, curr_relid);
+			}
+
+			/* Bottom-Up Collapse. Check if parents can represent children */
+			all_tables = find_all_inheritors(root_relid, AccessShareLock, NULL);
+			candidate_list = list_copy(allowed_leaves);
+			foreach_oid(curr_relid, all_tables)
+			{
+				List	   *branch_leaves = NIL;
+				bool		all_allowed = true;
+
+				/* Only consider partitioned tables as collapse candidates */
+				if (get_rel_relkind(curr_relid) != RELKIND_PARTITIONED_TABLE)
+					continue;
+
+				branch_leaves = GetPubPartitionOptionRelations(branch_leaves,
+															   PUBLICATION_PART_LEAF,
+															   curr_relid);
+				if (branch_leaves == NIL)
+					continue;
+
+				foreach_oid(lcb_oid, branch_leaves)
+				{
+					if (!list_member_oid(allowed_leaves, lcb_oid))
+					{
+						all_allowed = false;
+						break;
+					}
+				}
+
+				if (all_allowed)
+					candidate_list = list_append_unique_oid(candidate_list,
+															curr_relid);
+			}
+
+			/*
+			 * Deduplicate: Filter out any relation whose ancestor is already
+			 * present in the candidate list. This ensures we only return the
+			 * "highest" representative for each branch.
+			 */
+			oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+
+			foreach_oid(curr_relid, candidate_list)
+			{
+				List	   *ancestors = get_partition_ancestors(curr_relid);
+				bool		ancestor_already_included = false;
+
+				/*
+				 * Check if any ancestor of the current relation exists in the
+				 * candidate list. If so, this relation is redundant.
+				 */
+				foreach_oid(ancestor_relid, ancestors)
+				{
+					if (list_member_oid(candidate_list, ancestor_relid))
+					{
+						ancestor_already_included = true;
+						break;
+					}
+				}
+
+				if (!ancestor_already_included)
+					final_output = lappend_oid(final_output, curr_relid);
+
+				list_free(ancestors);
+			}
+
+			MemoryContextSwitchTo(oldcontext);
+		}
+
+		oldcontext = MemoryContextSwitchTo(funcctx->multi_call_memory_ctx);
+		/* Construct a tuple descriptor for the result rows. */
+		tupdesc = CreateTemplateTupleDesc(2);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 1, "nspname",
+						   TEXTOID, -1, 0);
+		TupleDescInitEntry(tupdesc, (AttrNumber) 2, "relname",
+						   TEXTOID, -1, 0);
+
+		funcctx->tuple_desc = BlessTupleDesc(tupdesc);
+		funcctx->user_fctx = final_output;
+
+		MemoryContextSwitchTo(oldcontext);
+	}
+
+	/* SRF Per-call Resume */
+	funcctx = SRF_PERCALL_SETUP();
+	results = (List *) funcctx->user_fctx;
+
+	if (funcctx->call_cntr < list_length(results))
+	{
+		Oid			current_relid = list_nth_oid(results, (int) funcctx->call_cntr);
+		HeapTuple	rettuple;
+		Datum		values[2];
+		bool		nulls[2] = {false, false};
+
+		values[0] = CStringGetTextDatum(get_namespace_name(get_rel_namespace(current_relid)));
+		values[1] = CStringGetTextDatum(get_rel_name(current_relid));
+
+		rettuple = heap_form_tuple(funcctx->tuple_desc, values, nulls);
+		SRF_RETURN_NEXT(funcctx, HeapTupleGetDatum(rettuple));
+	}
+
+	SRF_RETURN_DONE(funcctx);
 }
 
 /*

@@ -205,11 +205,9 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
       tables are excluded.
      </para>
      <para>
-      For partitioned tables, only the root partitioned table may be specified
-      in <literal>EXCEPT TABLE</literal>. Doing so excludes the root table and
-      all of its partitions from replication, regardless of the value of
-      <literal>publish_via_partition_root</literal>. The optional
-      <literal>*</literal> has no effect for partitioned tables.
+      For partitioned tables, if a table is specified in EXCEPT TABLE, that
+      table and all of its partitions (that is, the entire partition subtree
+      rooted at that table) are excluded from the publication.
      </para>
      <para>
       There can be a case where a subscription includes multiple publications.

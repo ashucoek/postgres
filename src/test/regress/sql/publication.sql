@@ -159,10 +159,11 @@ CREATE TABLE testpub_part2 PARTITION OF testpub_root FOR VALUES FROM (100) TO (2
 CREATE PUBLICATION testpub8 FOR ALL TABLES EXCEPT TABLE (testpub_root);
 \dRp+ testpub8;
 CREATE PUBLICATION testpub9 FOR ALL TABLES EXCEPT TABLE (testpub_part1);
+\dRp+ testpub9;
 
 RESET client_min_messages;
 DROP TABLE testpub_root, testpub_part1, testpub_part2;
-DROP PUBLICATION testpub8;
+DROP PUBLICATION testpub8, testpub9;
 
 --- Tests for publications with SEQUENCES
 CREATE SEQUENCE regress_pub_seq0;

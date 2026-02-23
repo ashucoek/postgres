@@ -717,21 +717,28 @@ copy_read_data(void *outbuf, int minread, int maxread)
  * message provides during replication.
  *
  * This function also returns (a) the relation qualifications to be used in
- * the COPY command, and (b) whether the remote relation has published any
- * generated column.
+ * the COPY command, (b) whether the remote relation has published any
+ * generated column, and (c) computes a list of QualifiedRelationName to be used
+ * as COPY sources when an EXCEPT list is present. When no EXCEPT list is
+ * specified, the returned list is empty and the root relation is used as-is.
+ * When an EXCEPT list is specified, the list contains relations that
+ * do not appear in the EXCEPT list; these must be combined using UNION ALL.
  */
 static void
 fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
-						List **qual, bool *gencol_published)
+						List **qual, bool *gencol_published,
+						List **effective_relations)
 {
 	WalRcvExecResult *res;
 	StringInfoData cmd;
 	TupleTableSlot *slot;
-	Oid			tableRow[] = {OIDOID, CHAROID, CHAROID};
+	Oid			tableRow[] = {OIDOID, CHAROID, CHAROID, BOOLOID};
 	Oid			attrRow[] = {INT2OID, TEXTOID, OIDOID, BOOLOID, BOOLOID};
 	Oid			qualRow[] = {TEXTOID};
+	Oid			filtertableRow[] = {TEXTOID, TEXTOID};
 	bool		isnull;
 	int			natt;
+	bool		is_partition;
 	StringInfo	pub_names = NULL;
 	Bitmapset  *included_cols = NULL;
 	int			server_version = walrcv_server_version(LogRepWorkerWalRcvConn);
@@ -741,7 +748,7 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 
 	/* First fetch Oid and replica identity. */
 	initStringInfo(&cmd);
-	appendStringInfo(&cmd, "SELECT c.oid, c.relreplident, c.relkind"
+	appendStringInfo(&cmd, "SELECT c.oid, c.relreplident, c.relkind, c.relispartition"
 					 "  FROM pg_catalog.pg_class c"
 					 "  INNER JOIN pg_catalog.pg_namespace n"
 					 "        ON (c.relnamespace = n.oid)"
@@ -770,6 +777,8 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 	lrel->replident = DatumGetChar(slot_getattr(slot, 2, &isnull));
 	Assert(!isnull);
 	lrel->relkind = DatumGetChar(slot_getattr(slot, 3, &isnull));
+	Assert(!isnull);
+	is_partition = DatumGetBool(slot_getattr(slot, 4, &isnull));
 	Assert(!isnull);
 
 	ExecDropSingleTupleTableSlot(slot);
@@ -956,6 +965,84 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 	walrcv_clear_result(res);
 
 	/*
+	 * EXCEPT TABLE syntax is supported in PostgreSQL 19. Any level of
+	 * partition may be specified in the EXCEPT list. When a root partitioned
+	 * table is published, some of its partitions may appear in the EXCEPT
+	 * list, and tablesync must not be performed for those partitions.
+	 */
+	if (server_version >= 190000 && !is_partition &&
+		lrel->relkind == RELKIND_PARTITIONED_TABLE)
+	{
+		resetStringInfo(&cmd);
+
+		/*
+		 * This query recursively traverses the partition tree starting from
+		 * the given table OID and determines which leaf relations should be
+		 * included for replication. Exclusion propagates from parent to
+		 * child, and a relation is also treated as excluded if it is
+		 * explicitly marked with prexcept = true in pg_publication_rel for
+		 * the specified publications. The final result returns only non
+		 * excluded leaf relations.
+		 */
+		appendStringInfo(&cmd, "SELECT nspname, relname FROM pg_get_publication_effective_tables(%u, ARRAY[%s]);",
+						 lrel->remoteid,
+						 pub_names->data);
+
+		elog(LOG, "Executing query to get the partition tables to be copied:\n%s", cmd.data);
+		res = walrcv_exec(LogRepWorkerWalRcvConn, cmd.data,
+						  lengthof(filtertableRow), filtertableRow);
+
+		if (res->status != WALRCV_OK_TUPLES)
+			ereport(ERROR,
+					errcode(ERRCODE_CONNECTION_FAILURE),
+					errmsg("could not get effective included table list for table \"%s.%s\" from publisher: %s",
+						   nspname, relname, res->err));
+
+		/*
+		 * Build the list of relations to be used as COPY sources. Each entry
+		 * is stored as a QualifiedRelationName containing the schema name and
+		 * relation name.
+		 */
+		slot = MakeSingleTupleTableSlot(res->tupledesc, &TTSOpsMinimalTuple);
+		while (tuplestore_gettupleslot(res->tuplestore, true, false, slot))
+		{
+			QualifiedRelationName *relinfo = palloc_object(QualifiedRelationName);
+
+			relinfo->nspname = TextDatumGetCString(slot_getattr(slot, 1, &isnull));
+			Assert(!isnull);
+			relinfo->relname = TextDatumGetCString(slot_getattr(slot, 2, &isnull));
+			Assert(!isnull);
+
+			*effective_relations = lappend(*effective_relations, relinfo);
+
+			ExecClearTuple(slot);
+		}
+
+		/* walrcv_clear_result(res); */
+		ExecDropSingleTupleTableSlot(slot);
+
+		/*
+		 * If there is exactly one item in the effective_relations list and it
+		 * equals the table being processed, that means no actual exclusion
+		 * occurred.
+		 */
+		if (list_length(*effective_relations) == 1)
+		{
+			QualifiedRelationName *relinfo;
+
+			relinfo = linitial(*effective_relations);
+			if (strcmp(nspname, relinfo->nspname) == 0 &&
+				strcmp(relname, relinfo->relname) == 0)
+			{
+				pfree(relinfo->nspname);
+				pfree(relinfo->relname);
+				list_free_deep(*effective_relations);
+				*effective_relations = NIL;
+			}
+		}
+	}
+
+	/*
 	 * Get relation's row filter expressions. DISTINCT avoids the same
 	 * expression of a table in multiple publications from being included
 	 * multiple times in the final expression.
@@ -1034,6 +1121,21 @@ fetch_remote_table_info(char *nspname, char *relname, LogicalRepRelation *lrel,
 }
 
 /*
+ * Append a comma-separated list of quoted column names to buf.
+ */
+static void
+append_column_list(StringInfo buf, char **attnames, int natts)
+{
+	for (int i = 0; i < natts; i++)
+	{
+		if (i > 0)
+			appendStringInfoString(buf, ", ");
+
+		appendStringInfoString(buf, quote_identifier(attnames[i]));
+	}
+}
+
+/*
  * Copy existing data of a table from publisher.
  *
  * Caller is responsible for locking the local relation.
@@ -1044,6 +1146,7 @@ copy_table(Relation rel)
 	LogicalRepRelMapEntry *relmapentry;
 	LogicalRepRelation lrel;
 	List	   *qual = NIL;
+	List	   *effective_relations = NIL;
 	WalRcvExecResult *res;
 	StringInfoData cmd;
 	CopyFromState cstate;
@@ -1055,7 +1158,7 @@ copy_table(Relation rel)
 	/* Get the publisher relation info. */
 	fetch_remote_table_info(get_namespace_name(RelationGetNamespace(rel)),
 							RelationGetRelationName(rel), &lrel, &qual,
-							&gencol_published);
+							&gencol_published, &effective_relations);
 
 	/* Put the relation into relmap. */
 	logicalrep_relmap_update(&lrel);
@@ -1067,9 +1170,52 @@ copy_table(Relation rel)
 	/* Start copy on the publisher. */
 	initStringInfo(&cmd);
 
+	if (list_length(effective_relations))
+	{
+		bool		first = true;
+
+		/*
+		 * Build a single COPY command to synchronize all resolved relations
+		 * into the root table.
+		 *
+		 * The array 'effective_relations' contains the leaf tables of
+		 * partition hierarchies, with excluded subtrees removed according to
+		 * the EXCEPT clauses. This applies only when
+		 * 'publish_via_partition_root' is enabled, since the initial sync
+		 * must route all changes to the root table.
+		 *
+		 * We construct a UNION ALL query that combines data from multiple
+		 * leaf relations into one sub-COPY statement, ensuring all rows are
+		 * copied consistently into the root table.
+		 */
+		appendStringInfoString(&cmd, "COPY (\n");
+		foreach_ptr(QualifiedRelationName, relinfo, effective_relations)
+		{
+			if (!first)
+				appendStringInfoString(&cmd, "UNION ALL\n");
+
+			first = false;
+
+			appendStringInfoString(&cmd, "SELECT ");
+
+			/* If the table has columns, then specify the columns */
+			if (lrel.natts)
+				append_column_list(&cmd, lrel.attnames, lrel.natts);
+			else
+				appendStringInfoString(&cmd, " * ");
+
+			appendStringInfo(&cmd, " FROM  %s\n",
+							 quote_qualified_identifier(relinfo->nspname,
+														relinfo->relname));
+		}
+
+		appendStringInfoString(&cmd, ")\n");
+		appendStringInfoString(&cmd, "TO STDOUT");
+	}
 	/* Regular or partitioned table with no row filter or generated columns */
-	if ((lrel.relkind == RELKIND_RELATION || lrel.relkind == RELKIND_PARTITIONED_TABLE)
-		&& qual == NIL && !gencol_published)
+	else if ((lrel.relkind == RELKIND_RELATION ||
+			  lrel.relkind == RELKIND_PARTITIONED_TABLE) &&
+			 qual == NIL && !gencol_published)
 	{
 		appendStringInfo(&cmd, "COPY %s",
 						 quote_qualified_identifier(lrel.nspname, lrel.relname));
@@ -1083,13 +1229,7 @@ copy_table(Relation rel)
 			 * XXX Do we need to list the columns in all cases? Maybe we're
 			 * replicating all columns?
 			 */
-			for (int i = 0; i < lrel.natts; i++)
-			{
-				if (i > 0)
-					appendStringInfoString(&cmd, ", ");
-
-				appendStringInfoString(&cmd, quote_identifier(lrel.attnames[i]));
-			}
+			append_column_list(&cmd, lrel.attnames, lrel.natts);
 
 			appendStringInfoChar(&cmd, ')');
 		}
@@ -1110,13 +1250,7 @@ copy_table(Relation rel)
 		 * is not supported by the normal COPY.
 		 */
 		appendStringInfoString(&cmd, "COPY (SELECT ");
-		for (int i = 0; i < lrel.natts; i++)
-		{
-			appendStringInfoString(&cmd, quote_identifier(lrel.attnames[i]));
-			if (i < lrel.natts - 1)
-				appendStringInfoString(&cmd, ", ");
-		}
-
+		append_column_list(&cmd, lrel.attnames, lrel.natts);
 		appendStringInfoString(&cmd, " FROM ");
 
 		/*
@@ -1158,6 +1292,7 @@ copy_table(Relation rel)
 	}
 
 	res = walrcv_exec(LogRepWorkerWalRcvConn, cmd.data, 0, NULL);
+	elog(LOG, "Tablesync worker: Executing query to get the initial sync data:\n%s", cmd.data);
 	pfree(cmd.data);
 	if (res->status != WALRCV_OK_COPY_OUT)
 		ereport(ERROR,
