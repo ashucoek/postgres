@@ -74,6 +74,13 @@ ALTER PUBLICATION testpub_fortable DROP TABLES IN SCHEMA pub_test;
 ALTER PUBLICATION testpub_fortable SET TABLES IN SCHEMA pub_test;
 \dRp+ testpub_fortable
 
+-- fail - can't add an EXCEPT TABLE to 'FOR TABLE' publication
+ALTER PUBLICATION testpub_fortable ADD EXCEPT TABLE testpub_tbl1;
+-- fail - can't drop an EXCEPT TABLE from 'FOR TABLE' publication
+ALTER PUBLICATION testpub_fortable DROP EXCEPT TABLE testpub_tbl1;
+-- fail - can't set an EXCEPT TABLE to 'FOR TABLE' publication
+ALTER PUBLICATION testpub_fortable SET EXCEPT TABLE testpub_tbl1;
+
 SET client_min_messages = 'ERROR';
 CREATE PUBLICATION testpub_forschema FOR TABLES IN SCHEMA pub_test;
 -- should be able to create publication with schema and table of the same
@@ -105,6 +112,13 @@ SELECT pubname, puballtables FROM pg_publication WHERE pubname = 'testpub_forall
 \d+ testpub_tbl2
 \dRp+ testpub_foralltables
 
+-- fail - can't add an EXCEPT TABLE to schema publication
+ALTER PUBLICATION testpub_forschema ADD EXCEPT TABLE pub_test.testpub_nopk;;
+-- fail - can't drop an EXCEPT TABLE from schema publication
+ALTER PUBLICATION testpub_forschema DROP EXCEPT TABLE pub_test.testpub_nopk;;
+-- fail - can't set an EXCEPT TABLE to schema publication
+ALTER PUBLICATION testpub_forschema SET EXCEPT TABLE pub_test.testpub_nopk;;
+
 ---------------------------------------------
 -- EXCEPT TABLE tests for normal tables
 ---------------------------------------------
@@ -119,6 +133,17 @@ CREATE PUBLICATION testpub_foralltables_excepttable1 FOR ALL TABLES EXCEPT (test
 -- Check that the table description shows the publications where it is listed
 -- in the EXCEPT clause
 \d testpub_tbl1
+
+-- Drop table from the EXCEPT list of a FOR ALL TABLES publication.
+ALTER PUBLICATION testpub_foralltables_excepttable DROP EXCEPT TABLE testpub_tbl1;
+\dRp+ testpub_foralltables_excepttable
+
+-- Replace the publication EXCEPT table list with a specific EXCEPT table.
+ALTER PUBLICATION testpub_foralltables_excepttable SET EXCEPT TABLE testpub_tbl1;
+\dRp+ testpub_foralltables_excepttable
+
+-- fail - Adding EXCEPT table is not supported.
+ALTER PUBLICATION testpub_foralltables_excepttable ADD EXCEPT TABLE testpub_tbl1;
 
 RESET client_min_messages;
 DROP TABLE testpub_tbl2;

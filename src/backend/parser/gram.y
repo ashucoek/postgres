@@ -207,7 +207,7 @@ static void preprocess_pub_all_objtype_list(List *all_objects_list,
 											bool *all_tables,
 											bool *all_sequences,
 											core_yyscan_t yyscanner);
-static void preprocess_pubobj_list(List *pubobjspec_list,
+static bool preprocess_pubobj_list(List *pubobjspec_list,
 								   core_yyscan_t yyscanner);
 static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 
@@ -581,7 +581,7 @@ static Node *makeRecursiveViewSelect(char *relname, List *aliases, Node *query);
 				Bit ConstBit BitWithLength BitWithoutLength
 %type <str>		character
 %type <str>		extract_arg
-%type <boolean> opt_varying opt_timezone opt_no_inherit
+%type <boolean> opt_varying opt_timezone opt_no_inherit opt_except
 
 %type <ival>	Iconst SignedIconst
 %type <str>		Sconst comment_text notify_payload
@@ -10830,14 +10830,26 @@ CreatePublicationStmt:
 				}
 			| CREATE PUBLICATION name FOR pub_obj_list opt_definition
 				{
+					bool has_except_table;
 					CreatePublicationStmt *n = makeNode(CreatePublicationStmt);
 
 					n->pubname = $3;
 					n->options = $6;
 					n->pubobjects = (List *) $5;
-					preprocess_pubobj_list(n->pubobjects, yyscanner);
+					has_except_table = preprocess_pubobj_list(n->pubobjects,
+															  yyscanner);
+					if (has_except_table)
+						ereport(ERROR,
+								errcode(ERRCODE_SYNTAX_ERROR),
+								errmsg("EXCEPT TABLE clause allowed only for ALL TABLES PUBLICATION"));
+
 					$$ = (Node *) n;
 				}
+		;
+
+opt_except:
+			EXCEPT									{ $$ = true; }
+			| /*EMPTY*/								{ $$ = false; }
 		;
 
 /*
@@ -10854,14 +10866,14 @@ CreatePublicationStmt:
  * relation_expr here.
  */
 PublicationObjSpec:
-			TABLE relation_expr opt_column_list OptWhereClause
+			opt_except TABLE relation_expr opt_column_list OptWhereClause
 				{
 					$$ = makeNode(PublicationObjSpec);
-					$$->pubobjtype = PUBLICATIONOBJ_TABLE;
+					$$->pubobjtype = ($1) ? PUBLICATIONOBJ_EXCEPT_TABLE : PUBLICATIONOBJ_TABLE;
 					$$->pubtable = makeNode(PublicationTable);
-					$$->pubtable->relation = $2;
-					$$->pubtable->columns = $3;
-					$$->pubtable->whereClause = $4;
+					$$->pubtable->relation = $3;
+					$$->pubtable->columns = $4;
+					$$->pubtable->whereClause = $5;
 				}
 			| TABLES IN_P SCHEMA ColId
 				{
@@ -11012,11 +11024,18 @@ AlterPublicationStmt:
 				}
 			| ALTER PUBLICATION name ADD_P pub_obj_list
 				{
+					bool has_except_table = false;
 					AlterPublicationStmt *n = makeNode(AlterPublicationStmt);
 
 					n->pubname = $3;
 					n->pubobjects = $5;
-					preprocess_pubobj_list(n->pubobjects, yyscanner);
+					has_except_table = preprocess_pubobj_list(n->pubobjects,
+															  yyscanner);
+					if (has_except_table)
+						ereport(ERROR,
+								errcode(ERRCODE_SYNTAX_ERROR),
+								errmsg("EXCEPT TABLE clause allowed only for SET/DROP clause"));
+
 					n->action = AP_AddObjects;
 					$$ = (Node *) n;
 				}
@@ -19882,16 +19901,19 @@ preprocess_pub_all_objtype_list(List *all_objects_list, List **pubobjects,
 /*
  * Process pubobjspec_list to check for errors in any of the objects and
  * convert PUBLICATIONOBJ_CONTINUATION into appropriate PublicationObjSpecType.
+ *
+ * Return true if an EXCEPT table is found.
  */
-static void
+static bool
 preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 {
 	ListCell   *cell;
 	PublicationObjSpec *pubobj;
 	PublicationObjSpecType prevobjtype = PUBLICATIONOBJ_CONTINUATION;
+	bool		foundexcepttable = false;
 
 	if (!pubobjspec_list)
-		return;
+		return false;
 
 	pubobj = (PublicationObjSpec *) linitial(pubobjspec_list);
 	if (pubobj->pubobjtype == PUBLICATIONOBJ_CONTINUATION)
@@ -19908,7 +19930,8 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 		if (pubobj->pubobjtype == PUBLICATIONOBJ_CONTINUATION)
 			pubobj->pubobjtype = prevobjtype;
 
-		if (pubobj->pubobjtype == PUBLICATIONOBJ_TABLE)
+		if (pubobj->pubobjtype == PUBLICATIONOBJ_TABLE ||
+			pubobj->pubobjtype == PUBLICATIONOBJ_EXCEPT_TABLE)
 		{
 			/* relation name or pubtable must be set for this type of object */
 			if (!pubobj->name && !pubobj->pubtable)
@@ -19926,6 +19949,25 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 					makeRangeVar(NULL, pubobj->name, pubobj->location);
 				pubobj->pubtable = pubtable;
 				pubobj->name = NULL;
+			}
+
+			if (pubobj->pubobjtype == PUBLICATIONOBJ_EXCEPT_TABLE)
+			{
+				foundexcepttable = true;
+
+				/* WHERE clause is not allowed on an except table */
+				if (pubobj->pubtable->whereClause)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("WHERE clause not allowed for except table"),
+							parser_errposition(pubobj->location));
+
+				/* Column list is not allowed on a except table */
+				if (pubobj->pubtable && pubobj->pubtable->columns)
+					ereport(ERROR,
+							errcode(ERRCODE_SYNTAX_ERROR),
+							errmsg("column specification not allowed for except table"),
+							parser_errposition(pubobj->location));
 			}
 		}
 		else if (pubobj->pubobjtype == PUBLICATIONOBJ_TABLES_IN_SCHEMA ||
@@ -19962,6 +20004,8 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 
 		prevobjtype = pubobj->pubobjtype;
 	}
+
+	return foundexcepttable;
 }
 
 /*----------

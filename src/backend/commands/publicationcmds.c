@@ -181,7 +181,7 @@ parse_publication_options(ParseState *pstate,
  */
 static void
 ObjectsInPublicationToOids(List *pubobjspec_list, ParseState *pstate,
-						   List **rels, List **schemas)
+						   List **rels, List **exceptrels, List **schemas)
 {
 	ListCell   *cell;
 	PublicationObjSpec *pubobj;
@@ -200,7 +200,7 @@ ObjectsInPublicationToOids(List *pubobjspec_list, ParseState *pstate,
 		{
 			case PUBLICATIONOBJ_EXCEPT_TABLE:
 				pubobj->pubtable->except = true;
-				*rels = lappend(*rels, pubobj->pubtable);
+				*exceptrels = lappend(*exceptrels, pubobj->pubtable);
 				break;
 			case PUBLICATIONOBJ_TABLE:
 				pubobj->pubtable->except = false;
@@ -849,8 +849,8 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 	char		publish_generated_columns;
 	AclResult	aclresult;
 	List	   *relations = NIL;
+	List	   *exceptrelations = NIL;
 	List	   *schemaidlist = NIL;
-	List	   *rels = NIL;
 
 	/* must have CREATE privilege on database */
 	aclresult = object_aclcheck(DatabaseRelationId, MyDatabaseId, GetUserId(), ACL_CREATE);
@@ -936,20 +936,16 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 
 	/* Associate objects with the publication. */
 	ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
-							   &schemaidlist);
-	if (relations != NIL)
-	{
-		Assert(!stmt->for_all_sequences);
-		rels = OpenTableList(relations);
-	}
+							   &exceptrelations, &schemaidlist);
 
 	if (stmt->for_all_tables)
 	{
 		/* Process EXCEPT table list */
-		if (relations != NIL)
+		if (exceptrelations != NIL)
 		{
-			Assert(rels != NIL);
-			PublicationAddTables(puboid, rels, true, NULL);
+			exceptrelations = OpenTableList(exceptrelations);
+			PublicationAddTables(puboid, exceptrelations, true, NULL);
+			CloseTableList(exceptrelations);
 		}
 
 		/*
@@ -969,6 +965,9 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 
 		if (relations != NIL)
 		{
+			List	   *rels;
+
+			rels = OpenTableList(relations);
 			TransformPubWhereClauses(rels, pstate->p_sourcetext,
 									 publish_via_partition_root);
 
@@ -977,6 +976,7 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 									   publish_via_partition_root);
 
 			PublicationAddTables(puboid, rels, true, NULL);
+			CloseTableList(rels);
 		}
 
 		if (schemaidlist != NIL)
@@ -989,9 +989,6 @@ CreatePublication(ParseState *pstate, CreatePublicationStmt *stmt)
 			PublicationAddSchemas(puboid, schemaidlist, true, NULL);
 		}
 	}
-
-	if (rels != NIL)
-		CloseTableList(rels);
 
 	table_close(rel, RowExclusiveLock);
 
@@ -1273,15 +1270,24 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		PublicationDropTables(pubid, rels, false);
 	else						/* AP_SetObjects */
 	{
-		List	   *oldrelids = GetIncludedPublicationRelations(pubid,
-																PUBLICATION_PART_ROOT);
+		bool		isexcept = pubform->puballtables;
+		List	   *oldrelids;
 		List	   *delrels = NIL;
 		ListCell   *oldlc;
 
-		TransformPubWhereClauses(rels, queryString, pubform->pubviaroot);
+		if (isexcept)
+			oldrelids = GetExcludedPublicationTables(pubid,
+													 PUBLICATION_PART_ROOT);
+		else
+		{
+			oldrelids = GetIncludedPublicationRelations(pubid,
+														PUBLICATION_PART_ROOT);
 
-		CheckPubRelationColumnList(stmt->pubname, rels, publish_schema,
-								   pubform->pubviaroot);
+			TransformPubWhereClauses(rels, queryString, pubform->pubviaroot);
+
+			CheckPubRelationColumnList(stmt->pubname, rels, publish_schema,
+									   pubform->pubviaroot);
+		}
 
 		/*
 		 * To recreate the relation list for the publication, look for
@@ -1489,7 +1495,7 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
  */
 static void
 CheckAlterPublication(AlterPublicationStmt *stmt, HeapTuple tup,
-					  List *tables, List *schemaidlist)
+					  List *tables, List *excepttables, List *schemaidlist)
 {
 	Form_pg_publication pubform = (Form_pg_publication) GETSTRUCT(tup);
 
@@ -1547,6 +1553,14 @@ CheckAlterPublication(AlterPublicationStmt *stmt, HeapTuple tup,
 						   NameStr(pubform->pubname)),
 					errdetail("Tables or sequences cannot be added to or dropped from FOR ALL SEQUENCES publications."));
 	}
+
+	/* Check that user is allowed to manipulate the publication tables. */
+	if (excepttables && !pubform->puballtables)
+		ereport(ERROR,
+				errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
+				errmsg("publication \"%s\" is defined as NON FOR ALL TABLES",
+					   NameStr(pubform->pubname)),
+				errdetail("EXCEPT Tables cannot be added to or dropped from non FOR ALL TABLES publications."));
 }
 
 /*
@@ -1585,13 +1599,15 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 	else
 	{
 		List	   *relations = NIL;
+		List	   *exceptrelations = NIL;
 		List	   *schemaidlist = NIL;
 		Oid			pubid = pubform->oid;
 
 		ObjectsInPublicationToOids(stmt->pubobjects, pstate, &relations,
-								   &schemaidlist);
+								   &exceptrelations, &schemaidlist);
 
-		CheckAlterPublication(stmt, tup, relations, schemaidlist);
+		CheckAlterPublication(stmt, tup, relations, exceptrelations,
+							  schemaidlist);
 
 		heap_freetuple(tup);
 
@@ -1612,6 +1628,7 @@ AlterPublication(ParseState *pstate, AlterPublicationStmt *stmt)
 					errmsg("publication \"%s\" does not exist",
 						   stmt->pubname));
 
+		relations = list_concat(relations, exceptrelations);
 		AlterPublicationTables(stmt, tup, relations, pstate->p_sourcetext,
 							   schemaidlist != NIL);
 		AlterPublicationSchemas(stmt, tup, schemaidlist);
