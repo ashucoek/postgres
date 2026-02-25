@@ -4949,17 +4949,64 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
       </term>
       <listitem>
        <para>
-        A comma-separated list of streaming replication standby server slot names
-        that logical WAL sender processes will wait for. Logical WAL sender processes
-        will send decoded changes to plugins only after the specified replication
-        slots confirm receiving WAL. This guarantees that logical replication
+        Specifies which streaming replication standby server slots logical WAL
+        sender processes must wait for before delivering decoded changes. This
+        parameter uses the same syntax as
+        <xref linkend="guc-synchronous-standby-names"/>:
+<synopsis>
+[FIRST] <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="parameter">slot_name</replaceable> [, ...] )
+ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="parameter">slot_name</replaceable> [, ...] )
+<replaceable class="parameter">slot_name</replaceable> [, ...]
+</synopsis>
+        where <replaceable class="parameter">num_sync</replaceable> is
+        the number of physical replication slots that must confirm WAL
+        receipt before logical decoding proceeds,
+        and <replaceable class="parameter">slot_name</replaceable>
+        is the name of a physical replication slot.
+        <replaceable class="parameter">num_sync</replaceable>
+        must be an integer value greater than zero and must not exceed the
+        number of listed slots.
+       </para>
+       <para>
+        The keyword <literal>FIRST</literal>, coupled with
+        <replaceable class="parameter">num_sync</replaceable>, specifies
+        priority-based semantics. Logical decoding will wait until
+        <emphasis>all</emphasis> listed physical slots have confirmed WAL
+        receipt regardless of
+        <replaceable class="parameter">num_sync</replaceable>.
+        A plain comma-separated list without a keyword is equivalent to
+        <literal>FIRST 1 (...)</literal> and therefore also requires all
+        listed slots.
+       </para>
+       <para>
+        The keyword <literal>ANY</literal>, coupled with
+        <replaceable class="parameter">num_sync</replaceable>, specifies
+        quorum-based semantics. Logical decoding proceeds once at least
+        <replaceable class="parameter">num_sync</replaceable> of the listed
+        slots have caught up.
+        For example, a setting of <literal>ANY 1 (sb1_slot, sb2_slot)</literal>
+        will allow logical decoding to proceed as soon as either physical slot
+        has confirmed WAL receipt. This is useful in conjunction with
+        quorum-based synchronous replication
+        (<literal>synchronous_standby_names = 'ANY ...'</literal>), so that
+        logical decoding availability matches the commit durability guarantee.
+       </para>
+       <para>
+        <literal>FIRST</literal> and <literal>ANY</literal> are case-insensitive.
+        If these keywords are used as the name of a replication slot,
+        the <replaceable class="parameter">slot_name</replaceable> must
+        be double-quoted.
+       </para>
+       <para>
+        This guarantees that logical replication
         failover slots do not consume changes until those changes are received
-        and flushed to corresponding physical standbys. If a
+        and flushed to the required physical standbys. If a
         logical replication connection is meant to switch to a physical standby
         after the standby is promoted, the physical replication slot for the
         standby should be listed here. Note that logical replication will not
-        proceed if the slots specified in the
-        <varname>synchronized_standby_slots</varname> do not exist or are invalidated.
+        proceed if the slots specified in
+        <varname>synchronized_standby_slots</varname> do not exist or are
+        invalidated.
         Additionally, the replication management functions
         <link linkend="pg-replication-slot-advance">
         <function>pg_replication_slot_advance</function></link>,
@@ -4967,9 +5014,9 @@ ANY <replaceable class="parameter">num_sync</replaceable> ( <replaceable class="
         <function>pg_logical_slot_get_changes</function></link>, and
         <link linkend="pg-logical-slot-peek-changes">
         <function>pg_logical_slot_peek_changes</function></link>,
-        when used with logical failover slots, will block until all
-        physical slots specified in <varname>synchronized_standby_slots</varname> have
-        confirmed WAL receipt.
+        when used with logical failover slots, will block until the required
+        physical slots specified in <varname>synchronized_standby_slots</varname>
+        have confirmed WAL receipt.
        </para>
        <para>
         The standbys corresponding to the physical replication slots in
