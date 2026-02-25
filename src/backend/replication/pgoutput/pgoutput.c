@@ -1797,12 +1797,18 @@ pgoutput_shutdown(LogicalDecodingContext *ctx)
  * to silently continue the replication in the absence of a missing publication.
  * This is required because we allow the users to create publications after they
  * have specified the required publications at the time of replication start.
+ *
+ * We also enforce that no more than one publication in the list may contain
+ * an EXCEPT TABLE clause. Using multiple publications with EXCEPT TABLE clause
+ * is currently unsupported to prevent non-deterministic filtering behavior
+ * across overlapping publication sets.
  */
 static List *
 LoadPublications(List *pubnames)
 {
 	List	   *result = NIL;
 	ListCell   *lc;
+	List	   *pubnames_with_except = NIL;
 
 	foreach(lc, pubnames)
 	{
@@ -1810,7 +1816,13 @@ LoadPublications(List *pubnames)
 		Publication *pub = GetPublicationByName(pubname, true);
 
 		if (pub)
+		{
 			result = lappend(result, pub);
+
+			/* Check if this publication has an EXCEPT TABLE list. */
+			if (publication_has_any_except_table(pub->oid))
+				pubnames_with_except = lappend(pubnames_with_except, makeString(pubname));
+		}
 		else
 			ereport(WARNING,
 					errcode(ERRCODE_OBJECT_NOT_IN_PREREQUISITE_STATE),
@@ -1819,6 +1831,24 @@ LoadPublications(List *pubnames)
 					errhint("Create the publication if it does not exist."));
 	}
 
+	/*
+	 * If more than one publication has an EXCEPT list, throw an error listing
+	 * all the problematic publications.
+	 */
+	if (list_length(pubnames_with_except) > 1)
+	{
+		StringInfoData pub_names_str;
+
+		initStringInfo(&pub_names_str);
+		GetPublicationsStr(pubnames_with_except, &pub_names_str, true);
+
+		ereport(ERROR,
+				errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
+				errmsg("cannot combine publications %s with an EXCEPT TABLE clause",
+						pub_names_str.data));
+	}
+
+	list_free_deep(pubnames_with_except);
 	return result;
 }
 
@@ -2089,7 +2119,7 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 	if (!entry->replicate_valid)
 	{
 		Oid			schemaId = get_rel_namespace(relid);
-		List	   *pubids = GetRelationPublications(relid);
+		List	   *pubids = NIL;
 
 		/*
 		 * We don't acquire a lock on the namespace system table as we build
@@ -2103,6 +2133,8 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		bool		am_partition = get_rel_relispartition(relid);
 		char		relkind = get_rel_relkind(relid);
 		List	   *rel_publications = NIL;
+
+		GetRelationPublications(relid, &pubids, NULL);
 
 		/* Reload publications if needed before use. */
 		if (!publications_valid)
@@ -2206,14 +2238,22 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 			 */
 			if (pub->alltables)
 			{
-				publish = true;
-				if (pub->pubviaroot && am_partition)
+				List	   *exceptpubids = NIL;
+
+				if (am_partition && pub->pubviaroot)
 				{
 					List	   *ancestors = get_partition_ancestors(relid);
 
 					pub_relid = llast_oid(ancestors);
 					ancestor_level = list_length(ancestors);
 				}
+
+				GetRelationPublications(pub_relid, NULL, &exceptpubids);
+
+				if (!list_member_oid(exceptpubids, pub->oid))
+					publish = true;
+
+				list_free(exceptpubids);
 			}
 
 			if (!publish)
