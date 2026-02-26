@@ -41,7 +41,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
 
 <phrase>and <replaceable class="parameter">publication_drop_object</replaceable> is one of:</phrase>
 
-    TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ] [, ... ]
+    [ EXCEPT ] TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [ * ] [, ... ]
     TABLES IN SCHEMA { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [, ... ]
 
 <phrase>and <replaceable class="parameter">table_and_columns</replaceable> is:</phrase>
@@ -63,10 +63,11 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
    publication.  The <literal>SET</literal> clause will replace the list of
    except tables/tables/schemas in the publication with the specified list; the
    existing except tables/ tables/schemas that were present in the publication
-   will be removed.  The <literal>ADD</literal> and <literal>DROP</literal>
-   clauses will add and remove one or more tables/schemas from the publication.
-   Note that adding tables/schemas to a publication that is already subscribed
-   to will require an
+   will be removed.  The <literal>ADD</literal> clauses will add one or more
+   tables/schemas to the publication.  The <literal>DROP</literal> clauses
+   will remove one or more except tables/tables/schemas from the publication.
+   Note that adding tables/schemas or dropping except tables to a publication
+   that is already subscribed to will require an
    <link linkend="sql-altersubscription-params-refresh-publication">
    <literal>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</literal></link> action on the
    subscribing side in order to become effective. Note also that

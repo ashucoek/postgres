@@ -11032,7 +11032,7 @@ AlterPublicationStmt:
 					if (has_except_table)
 						ereport(ERROR,
 								errcode(ERRCODE_SYNTAX_ERROR),
-								errmsg("EXCEPT TABLE clause allowed only for SET clause"));
+								errmsg("EXCEPT TABLE clause allowed only for SET/DROP clause"));
 
 					n->action = AP_AddObjects;
 					$$ = (Node *) n;
@@ -11049,18 +11049,11 @@ AlterPublicationStmt:
 				}
 			| ALTER PUBLICATION name DROP pub_obj_list
 				{
-					bool has_except_table = false;
 					AlterPublicationStmt *n = makeNode(AlterPublicationStmt);
 
 					n->pubname = $3;
 					n->pubobjects = $5;
-					has_except_table = preprocess_pubobj_list(n->pubobjects,
-															  yyscanner);
-					if (has_except_table)
-						ereport(ERROR,
-								errcode(ERRCODE_SYNTAX_ERROR),
-								errmsg("EXCEPT TABLE clause allowed only for SET clause"));
-
+					preprocess_pubobj_list(n->pubobjects, yyscanner);
 					n->action = AP_DropObjects;
 					$$ = (Node *) n;
 				}

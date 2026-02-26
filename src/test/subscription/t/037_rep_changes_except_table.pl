@@ -137,6 +137,35 @@ $result =
   $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM sch1.tab1");
 is($result, qq(0), 'check replicated inserts on subscriber');
 
+# Remove sch1.tab1 from the publication's EXCEPT list so that it becomes part
+# of the ALL TABLES publication.
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION tap_pub_schema DROP EXCEPT TABLE sch1.tab1");
+
+# Refresh the subscription so the subscriber picks up the updated
+# publication definition and initiates table synchronization.
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION tap_sub_schema REFRESH PUBLICATION");
+
+# Wait for initial table sync to finish
+$node_subscriber->wait_for_subscription_sync($node_publisher,
+	'tap_sub_schema');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM sch1.tab1");
+is($result, qq(20), 'check replicated inserts on subscriber');
+
+# Insert additional rows on the publisher after synchronization.
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO sch1.tab1 VALUES(generate_series(21,30))");
+
+$node_publisher->wait_for_catchup('tap_sub_schema');
+
+# Verify that the new inserts are also replicated.
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM sch1.tab1");
+is($result, qq(30), 'check replicated inserts on subscriber');
+
 # cleanup
 $node_subscriber->safe_psql('postgres', "DROP SUBSCRIPTION tap_sub_schema");
 $node_publisher->safe_psql(

@@ -2317,8 +2317,10 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH(",");
 	/* ALTER PUBLICATION <name> DROP */
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "DROP"))
-		COMPLETE_WITH("TABLES IN SCHEMA", "TABLE");
-		/* ALTER PUBLICATION <name> SET */
+		COMPLETE_WITH("EXCEPT", "TABLES IN SCHEMA", "TABLE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "DROP", "EXCEPT"))
+		COMPLETE_WITH("TABLE");
+	/* ALTER PUBLICATION <name> SET */
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET"))
 		COMPLETE_WITH("(", "EXCEPT", "TABLES IN SCHEMA", "TABLE");
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "EXCEPT"))

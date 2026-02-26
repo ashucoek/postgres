@@ -128,10 +128,11 @@ Tables from schemas:
 
 -- fail - can't add an EXCEPT TABLE to 'FOR TABLE' publication
 ALTER PUBLICATION testpub_fortable ADD EXCEPT TABLE testpub_tbl1;
-ERROR:  EXCEPT TABLE clause allowed only for SET clause
+ERROR:  EXCEPT TABLE clause allowed only for SET/DROP clause
 -- fail - can't drop an EXCEPT TABLE from 'FOR TABLE' publication
 ALTER PUBLICATION testpub_fortable DROP EXCEPT TABLE testpub_tbl1;
-ERROR:  EXCEPT TABLE clause allowed only for SET clause
+ERROR:  publication "testpub_fortable" is defined as NON FOR ALL TABLES
+DETAIL:  EXCEPT Tables cannot be added to or dropped from non FOR ALL TABLES publications.
 -- fail - can't set an EXCEPT TABLE to 'FOR TABLE' publication
 ALTER PUBLICATION testpub_fortable SET EXCEPT TABLE testpub_tbl1;
 ERROR:  publication "testpub_fortable" is defined as NON FOR ALL TABLES
@@ -225,10 +226,11 @@ Not-null constraints:
 
 -- fail - can't add an EXCEPT TABLE to schema publication
 ALTER PUBLICATION testpub_forschema ADD EXCEPT TABLE pub_test.testpub_nopk;
-ERROR:  EXCEPT TABLE clause allowed only for SET clause
+ERROR:  EXCEPT TABLE clause allowed only for SET/DROP clause
 -- fail - can't drop an EXCEPT TABLE from schema publication
 ALTER PUBLICATION testpub_forschema DROP EXCEPT TABLE pub_test.testpub_nopk;
-ERROR:  EXCEPT TABLE clause allowed only for SET clause
+ERROR:  publication "testpub_forschema" is defined as NON FOR ALL TABLES
+DETAIL:  EXCEPT Tables cannot be added to or dropped from non FOR ALL TABLES publications.
 -- fail - can't set an EXCEPT TABLE to schema publication
 ALTER PUBLICATION testpub_forschema SET EXCEPT TABLE pub_test.testpub_nopk;
 ERROR:  publication "testpub_forschema" is defined as NON FOR ALL TABLES
@@ -285,12 +287,18 @@ ALTER PUBLICATION testpub_foralltables_excepttable SET EXCEPT TABLE testpub_tbl1
 Except tables:
     "public.testpub_tbl1"
 
--- fail - Dropping EXCEPT table is not supported.
+-- Drop table from the EXCEPT list of a FOR ALL TABLES publication.
 ALTER PUBLICATION testpub_foralltables_excepttable DROP EXCEPT TABLE testpub_tbl1;
-ERROR:  EXCEPT TABLE clause allowed only for SET clause
+\dRp+ testpub_foralltables_excepttable
+                                          Publication testpub_foralltables_excepttable
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------
+ regress_publication_user | t          | f             | t       | t       | t       | t         | none              | f
+(1 row)
+
 -- fail - Adding EXCEPT table is not supported.
 ALTER PUBLICATION testpub_foralltables_excepttable ADD EXCEPT TABLE testpub_tbl1;
-ERROR:  EXCEPT TABLE clause allowed only for SET clause
+ERROR:  EXCEPT TABLE clause allowed only for SET/DROP clause
 RESET client_min_messages;
 DROP TABLE testpub_tbl2;
 DROP PUBLICATION testpub_foralltables, testpub_fortable, testpub_forschema, testpub_for_tbl_schema, testpub_foralltables_excepttable, testpub_foralltables_excepttable1;

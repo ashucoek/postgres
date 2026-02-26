@@ -138,8 +138,9 @@ CREATE PUBLICATION testpub_foralltables_excepttable1 FOR ALL TABLES EXCEPT (test
 ALTER PUBLICATION testpub_foralltables_excepttable SET EXCEPT TABLE testpub_tbl1;
 \dRp+ testpub_foralltables_excepttable
 
--- fail - Dropping EXCEPT table is not supported.
+-- Drop table from the EXCEPT list of a FOR ALL TABLES publication.
 ALTER PUBLICATION testpub_foralltables_excepttable DROP EXCEPT TABLE testpub_tbl1;
+\dRp+ testpub_foralltables_excepttable
 
 -- fail - Adding EXCEPT table is not supported.
 ALTER PUBLICATION testpub_foralltables_excepttable ADD EXCEPT TABLE testpub_tbl1;
