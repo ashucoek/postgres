@@ -5788,7 +5788,9 @@ RelationGetExclusionInfo(Relation indexRelation,
 void
 RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 {
-	List	   *puboids;
+	List	   *puboids = NIL;
+	List	   *exceptpuboids = NIL;
+	List	   *alltablespuboids;
 	ListCell   *lc;
 	MemoryContext oldcxt;
 	Oid			schemaid;
@@ -5826,7 +5828,7 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 	pubdesc->gencols_valid_for_delete = true;
 
 	/* Fetch the publication membership info. */
-	puboids = GetRelationPublications(relid);
+	GetRelationPublications(relid, &puboids, &exceptpuboids);
 	schemaid = RelationGetNamespace(relation);
 	puboids = list_concat_unique_oid(puboids, GetSchemaPublications(schemaid));
 
@@ -5838,16 +5840,25 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 		foreach(lc, ancestors)
 		{
 			Oid			ancestor = lfirst_oid(lc);
+			List	   *ancestor_puboids = NIL;
+			List	   *ancestor_exceptpuboids = NIL;
 
-			puboids = list_concat_unique_oid(puboids,
-											 GetRelationPublications(ancestor));
+			GetRelationPublications(ancestor, &ancestor_puboids,
+									&ancestor_exceptpuboids);
+
+			puboids = list_concat_unique_oid(puboids, ancestor_puboids);
 			schemaid = get_rel_namespace(ancestor);
 			puboids = list_concat_unique_oid(puboids,
 											 GetSchemaPublications(schemaid));
+			exceptpuboids = list_concat_unique_oid(exceptpuboids,
+												   ancestor_exceptpuboids);
 		}
 	}
-	puboids = list_concat_unique_oid(puboids, GetAllTablesPublications());
 
+	alltablespuboids = GetAllTablesPublications();
+	puboids = list_concat_unique_oid(puboids,
+									 list_difference_oid(alltablespuboids,
+														 exceptpuboids));
 	foreach(lc, puboids)
 	{
 		Oid			pubid = lfirst_oid(lc);

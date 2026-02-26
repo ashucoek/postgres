@@ -36,4 +36,6 @@ extern void CheckSubDeadTupleRetention(bool check_guc, bool sub_disabled,
 									   bool retention_active,
 									   bool max_retention_set);
 
+extern void CheckPublicationsForExceptClauses(List *except_publications);
+
 #endif							/* SUBSCRIPTIONCMDS_H */
