@@ -21,15 +21,21 @@ PostgreSQL documentation
 
  <refsynopsisdiv>
 <synopsis>
-ALTER PUBLICATION <replaceable class="parameter">name</replaceable> ADD <replaceable class="parameter">publication_object</replaceable> [, ...]
-ALTER PUBLICATION <replaceable class="parameter">name</replaceable> SET <replaceable class="parameter">publication_object</replaceable> [, ...]
+ALTER PUBLICATION <replaceable class="parameter">name</replaceable> ADD <replaceable class="parameter">publication_add_object</replaceable> [, ...]
+ALTER PUBLICATION <replaceable class="parameter">name</replaceable> SET <replaceable class="parameter">publication_set_object</replaceable> [, ...]
 ALTER PUBLICATION <replaceable class="parameter">name</replaceable> DROP <replaceable class="parameter">publication_drop_object</replaceable> [, ...]
 ALTER PUBLICATION <replaceable class="parameter">name</replaceable> SET ( <replaceable class="parameter">publication_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )
 ALTER PUBLICATION <replaceable class="parameter">name</replaceable> OWNER TO { <replaceable>new_owner</replaceable> | CURRENT_ROLE | CURRENT_USER | SESSION_USER }
 ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <replaceable>new_name</replaceable>
 
-<phrase>where <replaceable class="parameter">publication_object</replaceable> is one of:</phrase>
+<phrase>where <replaceable class="parameter">publication_add_object</replaceable> is one of:</phrase>
 
+    TABLE <replaceable class="parameter">table_and_columns</replaceable> [, ... ]
+    TABLES IN SCHEMA { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [, ... ]
+
+<phrase>where <replaceable class="parameter">publication_set_object</replaceable> is one of:</phrase>
+
+    EXCEPT TABLE [ ONLY ] <replaceable class="parameter">table_name</replaceable> [, ... ]
     TABLE <replaceable class="parameter">table_and_columns</replaceable> [, ... ]
     TABLES IN SCHEMA { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [, ... ]
 
@@ -55,11 +61,12 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
   <para>
    The first three variants change which tables/schemas are part of the
    publication.  The <literal>SET</literal> clause will replace the list of
-   tables/schemas in the publication with the specified list; the existing
-   tables/schemas that were present in the publication will be removed.  The
-   <literal>ADD</literal> and <literal>DROP</literal> clauses will add and
-   remove one or more tables/schemas from the publication.  Note that adding
-   tables/schemas to a publication that is already subscribed to will require an
+   except tables/tables/schemas in the publication with the specified list; the
+   existing except tables/ tables/schemas that were present in the publication
+   will be removed.  The <literal>ADD</literal> and <literal>DROP</literal>
+   clauses will add and remove one or more tables/schemas from the publication.
+   Note that adding tables/schemas to a publication that is already subscribed
+   to will require an
    <link linkend="sql-altersubscription-params-refresh-publication">
    <literal>ALTER SUBSCRIPTION ... REFRESH PUBLICATION</literal></link> action on the
    subscribing side in order to become effective. Note also that

@@ -2318,9 +2318,11 @@ match_previous_words(int pattern_id,
 	/* ALTER PUBLICATION <name> DROP */
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "DROP"))
 		COMPLETE_WITH("TABLES IN SCHEMA", "TABLE");
-	/* ALTER PUBLICATION <name> SET */
+		/* ALTER PUBLICATION <name> SET */
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET"))
-		COMPLETE_WITH("(", "TABLES IN SCHEMA", "TABLE");
+		COMPLETE_WITH("(", "EXCEPT", "TABLES IN SCHEMA", "TABLE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "EXCEPT"))
+		COMPLETE_WITH("TABLE");
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "ADD|DROP|SET", "TABLES", "IN", "SCHEMA"))
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_schemas
 								 " AND nspname NOT LIKE E'pg\\\\_%%'",
