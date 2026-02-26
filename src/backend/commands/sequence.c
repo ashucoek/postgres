@@ -930,6 +930,33 @@ lastval(PG_FUNCTION_ARGS)
 }
 
 /*
+ * Read the current sequence values (last_value and is_called)
+ *
+ * This is a read-only operation used by logical replication sequence
+ * synchronization to detect drift.
+ */
+void
+GetSequence(Relation seqrel, int64 *last_value, bool *is_called)
+{
+	Buffer		buf;
+	HeapTupleData seqtuple;
+	Form_pg_sequence_data seq;
+
+	/* Confirm that the relation is a sequence */
+	Assert(seqrel->rd_rel->relkind == RELKIND_SEQUENCE);
+
+	/* Read the sequence tuple */
+	seq = read_seq_tuple(seqrel, &buf, &seqtuple);
+
+	/* Extract the values */
+	*last_value = seq->last_value;
+	*is_called = seq->is_called;
+
+	/* Release buffer */
+	UnlockReleaseBuffer(buf);
+}
+
+/*
  * Main internal procedure that handles 2 & 3 arg forms of SETVAL.
  *
  * Note that the 3 arg version (which sets the is_called flag) is
