@@ -1950,7 +1950,7 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 		rb->memExceededCount <= 0)
 		return;
 
-	elog(DEBUG2, "UpdateDecodingStats: updating stats %p %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64,
+	elog(DEBUG2, "UpdateDecodingStats: updating stats %p %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64 " %" PRId64,
 		 rb,
 		 rb->spillTxns,
 		 rb->spillCount,
@@ -1960,7 +1960,8 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 		 rb->streamBytes,
 		 rb->memExceededCount,
 		 rb->totalTxns,
-		 rb->totalBytes);
+		 rb->totalBytes,
+		 rb->sentBytes);
 
 	repSlotStat.spill_txns = rb->spillTxns;
 	repSlotStat.spill_count = rb->spillCount;
@@ -1969,8 +1970,9 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 	repSlotStat.stream_count = rb->streamCount;
 	repSlotStat.stream_bytes = rb->streamBytes;
 	repSlotStat.mem_exceeded_count = rb->memExceededCount;
-	repSlotStat.total_txns = rb->totalTxns;
-	repSlotStat.total_bytes = rb->totalBytes;
+	repSlotStat.total_wal_txns = rb->totalTxns;
+	repSlotStat.total_wal_bytes = rb->totalBytes;
+	repSlotStat.sent_bytes = rb->sentBytes;
 
 	pgstat_report_replslot(ctx->slot, &repSlotStat);
 
@@ -1983,6 +1985,7 @@ UpdateDecodingStats(LogicalDecodingContext *ctx)
 	rb->memExceededCount = 0;
 	rb->totalTxns = 0;
 	rb->totalBytes = 0;
+	rb->sentBytes = 0;
 }
 
 /*

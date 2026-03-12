@@ -1651,24 +1651,35 @@ description | Waiting for a newly initialized WAL file to reach durable storage
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-        <structfield>total_txns</structfield> <type>bigint</type>
+        <structfield>total_wal_txns</structfield> <type>bigint</type>
        </para>
        <para>
-        Number of decoded transactions sent to the decoding output plugin for
-        this slot. This counts top-level transactions only, and is not incremented
-        for subtransactions. Note that this includes the transactions that are
-        streamed and/or spilled.
+        Number of decoded transactions from WAL sent to the decoding output
+        plugin for this slot. This counts top-level transactions only, and is
+        not incremented for subtransactions. Note that this includes the
+        transactions that are streamed and/or spilled.
        </para></entry>
      </row>
 
      <row>
       <entry role="catalog_table_entry"><para role="column_definition">
-        <structfield>total_bytes</structfield><type>bigint</type>
+        <structfield>total_wal_bytes</structfield><type>bigint</type>
        </para>
        <para>
         Amount of transaction data decoded for sending transactions to the
         decoding output plugin while decoding changes from WAL for this slot.
         Note that this includes data that is streamed and/or spilled.
+       </para>
+      </entry>
+     </row>
+
+     <row>
+      <entry role="catalog_table_entry"><para role="column_definition">
+        <structfield>sent_bytes</structfield><type>bigint</type>
+       </para>
+       <para>
+        Amount of transaction changes, in the output format, sent downstream for
+        this slot by the output plugin.
        </para>
       </entry>
      </row>

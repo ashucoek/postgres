@@ -25,8 +25,9 @@ sub test_slot_stats
 
 	my $result = $node->safe_psql(
 		'postgres', qq[
-		SELECT slot_name, total_txns > 0 AS total_txn,
-			   total_bytes > 0 AS total_bytes
+		SELECT slot_name, total_wal_txns > 0 AS total_txn,
+			   total_wal_bytes > 0 AS total_bytes,
+			   sent_bytes > 0 AS sent_bytes
 			   FROM pg_stat_replication_slots
 			   ORDER BY slot_name]);
 	is($result, $expected, $msg);
@@ -65,7 +66,7 @@ $node->poll_query_until(
 	'postgres', qq[
 	SELECT count(slot_name) >= 4 FROM pg_stat_replication_slots
 	WHERE slot_name ~ 'regression_slot'
-	AND total_txns > 0 AND total_bytes > 0;
+	AND total_wal_txns > 0 AND total_wal_bytes > 0;
 ]) or die "Timed out while waiting for statistics to be updated";
 
 # Test to drop one of the replication slot and verify replication statistics data is
@@ -80,9 +81,9 @@ $node->start;
 # restart.
 test_slot_stats(
 	$node,
-	qq(regression_slot1|t|t
-regression_slot2|t|t
-regression_slot3|t|t),
+	qq(regression_slot1|t|t|t
+regression_slot2|t|t|t
+regression_slot3|t|t|t),
 	'check replication statistics are updated');
 
 # Test to remove one of the replication slots and adjust
@@ -104,8 +105,8 @@ $node->start;
 # restart.
 test_slot_stats(
 	$node,
-	qq(regression_slot1|t|t
-regression_slot2|t|t),
+	qq(regression_slot1|t|t|t
+regression_slot2|t|t|t),
 	'check replication statistics after removing the slot file');
 
 # cleanup

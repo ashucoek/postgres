@@ -94,8 +94,9 @@ pgstat_report_replslot(ReplicationSlot *slot, const PgStat_StatReplSlotEntry *re
 	REPLSLOT_ACC(stream_count);
 	REPLSLOT_ACC(stream_bytes);
 	REPLSLOT_ACC(mem_exceeded_count);
-	REPLSLOT_ACC(total_txns);
-	REPLSLOT_ACC(total_bytes);
+	REPLSLOT_ACC(total_wal_txns);
+	REPLSLOT_ACC(total_wal_bytes);
+	REPLSLOT_ACC(sent_bytes);
 #undef REPLSLOT_ACC
 
 	pgstat_unlock_entry(entry_ref);

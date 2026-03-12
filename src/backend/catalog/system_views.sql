@@ -1103,8 +1103,9 @@ CREATE VIEW pg_stat_replication_slots AS
             s.stream_count,
             s.stream_bytes,
             s.mem_exceeded_count,
-            s.total_txns,
-            s.total_bytes,
+            s.total_wal_txns,
+            s.total_wal_bytes,
+            s.sent_bytes,
             s.slotsync_skip_count,
             s.slotsync_last_skip,
             s.stats_reset

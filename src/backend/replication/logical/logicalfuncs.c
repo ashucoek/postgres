@@ -65,6 +65,7 @@ LogicalOutputWrite(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xi
 	Datum		values[3];
 	bool		nulls[3];
 	DecodingOutputState *p;
+	int64		sentBytes = 0;
 
 	/* SQL Datums can only be of a limited length... */
 	if (ctx->out->len > MaxAllocSize - VARHDRSZ)
@@ -74,7 +75,9 @@ LogicalOutputWrite(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xi
 
 	memset(nulls, 0, sizeof(nulls));
 	values[0] = LSNGetDatum(lsn);
+	sentBytes += sizeof(XLogRecPtr);
 	values[1] = TransactionIdGetDatum(xid);
+	sentBytes += sizeof(TransactionId);
 
 	/*
 	 * Assert ctx->out is in database encoding when we're writing textual
@@ -87,8 +90,13 @@ LogicalOutputWrite(LogicalDecodingContext *ctx, XLogRecPtr lsn, TransactionId xi
 
 	/* ick, but cstring_to_text_with_len works for bytea perfectly fine */
 	values[2] = PointerGetDatum(cstring_to_text_with_len(ctx->out->data, ctx->out->len));
+	sentBytes += ctx->out->len;
 
 	tuplestore_putvalues(p->tupstore, p->tupdesc, values, nulls);
+
+	/* Update the amount of data sent downstream. */
+	ctx->reorder->sentBytes += sentBytes;
+
 	p->returned_rows++;
 }
 

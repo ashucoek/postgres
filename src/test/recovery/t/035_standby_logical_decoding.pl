@@ -577,7 +577,7 @@ $node_primary->safe_psql('testdb',
 	qq[INSERT INTO decoding_test(x,y) SELECT 100,'100';]);
 
 $node_standby->poll_query_until('testdb',
-	qq[SELECT total_txns > 0 FROM pg_stat_replication_slots WHERE slot_name = 'vacuum_full_activeslot']
+	qq[SELECT total_wal_txns > 0 FROM pg_stat_replication_slots WHERE slot_name = 'vacuum_full_activeslot']
 ) or die "replication slot stats of vacuum_full_activeslot not updated";
 
 # This should trigger the conflict
@@ -605,7 +605,7 @@ ok( $stderr =~
 # Ensure that replication slot stats are not removed after invalidation.
 is( $node_standby->safe_psql(
 		'testdb',
-		qq[SELECT total_txns > 0 FROM pg_stat_replication_slots WHERE slot_name = 'vacuum_full_activeslot']
+		qq[SELECT total_wal_txns > 0 FROM pg_stat_replication_slots WHERE slot_name = 'vacuum_full_activeslot']
 	),
 	't',
 	'replication slot stats not removed after invalidation');
