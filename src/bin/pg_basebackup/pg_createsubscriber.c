@@ -1840,7 +1840,7 @@ create_publication(PGconn *conn, struct LogicalRepInfo *dbinfo)
 		pg_log_info("creating publication \"%s\" in database \"%s\"",
 					dbinfo->pubname, dbinfo->dbname);
 
-	appendPQExpBuffer(str, "CREATE PUBLICATION %s FOR ALL TABLES",
+	appendPQExpBuffer(str, "CREATE PUBLICATION %s FOR ALL TABLES, ALL SEQUENCES",
 					  ipubname_esc);
 
 	pg_log_debug("command is: %s", str->data);
