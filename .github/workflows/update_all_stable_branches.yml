@@ -1,0 +1,44 @@
+name: Update stable branches
+on:
+  workflow_dispatch:     # manual trigger
+  schedule:
+    - cron: "0 4 * * *"  # optional: run daily at 4 AM UTC
+permissions:
+  contents: write        # needed for push
+jobs:
+  update-stable:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+      - name: Set up Git
+        run: |
+          git config --global user.email "github-actions[bot]@users.noreply.github.com"
+          git config --global user.name "github-actions[bot]"
+      - name: Add upstream remote
+        run: git remote add upstream https://github.com/postgres/postgres.git
+      - name: Fetch upstream
+        run: git fetch upstream
+      - name: Pull all REL_*_STABLE branches
+        run: |
+          # Get all REL_*_STABLE branches from upstream
+          for branch in $(git branch -r | grep 'upstream/REL_.*_STABLE' | sed 's/upstream\///'); do
+            # Extract version number (e.g., 12 from REL_12_STABLE)
+            version=$(echo $branch | sed 's/REL_\([0-9]*\)_STABLE/\1/')
+            # Only process branches from version 12 onwards
+            if [ "$version" -ge 12 ]; then
+              echo "Pulling branch: $branch"
+              # Checkout or create the branch
+              git checkout $branch 2>/dev/null || git checkout -b $branch upstream/$branch
+              # Pull from upstream
+              git pull upstream $branch
+            fi
+          done
+      - name: Push all stable branches
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          git push https://x-access-token:${GH_TOKEN}@github.com/${{ github.repository }} 'REL_*_STABLE' --force
