@@ -266,14 +266,20 @@ CREATE PUBLICATION regress_pub_forallsequences3 FOR ALL SEQUENCES EXCEPT (SEQUEN
 -- another schema.
 ALTER SEQUENCE regress_pub_seq2 SET SCHEMA pub_test;
 \dRp+ regress_pub_forallsequences3
+
+-- Modify the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences3 SET ALL SEQUENCES EXCEPT (SEQUENCE regress_pub_seq0);
+\dRp+ regress_pub_forallsequences3
 RESET client_min_messages;
 
 -- fail - sequence object is specified in EXCEPT table list
 CREATE PUBLICATION regress_pub_forallsequences4 FOR ALL TABLES EXCEPT (TABLE regress_pub_seq0);
+ALTER PUBLICATION regress_pub_forallsequences3 SET ALL TABLES EXCEPT (TABLE regress_pub_seq0);
 
 -- fail - table object is specified in EXCEPT sequence list
 CREATE TABLE tab_seq(a int);
 CREATE PUBLICATION regress_pub_forallsequences4 FOR ALL SEQUENCES EXCEPT (SEQUENCE tab_seq);
+ALTER PUBLICATION regress_pub_forallsequences3 SET ALL SEQUENCES EXCEPT (SEQUENCE tab_seq);
 
 -- Test combination of ALL SEQUENCES and ALL TABLES with EXCEPT clause
 SET client_min_messages = 'ERROR';
