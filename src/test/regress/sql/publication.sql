@@ -223,6 +223,7 @@ DROP PUBLICATION testpub8;
 --- Tests for publications with SEQUENCES
 CREATE SEQUENCE regress_pub_seq0;
 CREATE SEQUENCE pub_test.regress_pub_seq1;
+CREATE SEQUENCE regress_pub_seq2;
 
 -- FOR ALL SEQUENCES
 SET client_min_messages = 'ERROR';
@@ -253,10 +254,40 @@ RESET client_min_messages;
 SELECT pubname, puballtables, puballsequences FROM pg_publication WHERE pubname = 'regress_pub_for_allsequences_alltables';
 \dRp+ regress_pub_for_allsequences_alltables
 
-DROP SEQUENCE regress_pub_seq0, pub_test.regress_pub_seq1;
+-- Test ALL SEQUENCES with EXCEPT clause
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION regress_pub_forallsequences3 FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_pub_seq0, pub_test.regress_pub_seq1, SEQUENCE regress_pub_seq2);
+\dRp+ regress_pub_forallsequences3
+-- Check that the sequence description shows the publications where it is listed
+-- in the EXCEPT clause
+\d+ regress_pub_seq0
+
+-- Verify that an excluded sequence remains excluded after being moved to
+-- another schema.
+ALTER SEQUENCE regress_pub_seq2 SET SCHEMA pub_test;
+\dRp+ regress_pub_forallsequences3
+RESET client_min_messages;
+
+-- fail - sequence object is specified in EXCEPT table list
+CREATE PUBLICATION regress_pub_forallsequences4 FOR ALL TABLES EXCEPT (TABLE regress_pub_seq0);
+
+-- fail - table object is specified in EXCEPT sequence list
+CREATE TABLE tab_seq(a int);
+CREATE PUBLICATION regress_pub_forallsequences4 FOR ALL SEQUENCES EXCEPT (SEQUENCE tab_seq);
+
+-- Test combination of ALL SEQUENCES and ALL TABLES with EXCEPT clause
+SET client_min_messages = 'ERROR';
+CREATE PUBLICATION regress_pub_for_allsequences_alltables1 FOR ALL TABLES EXCEPT (TABLE testpub_tbl1), ALL SEQUENCES EXCEPT (SEQUENCE regress_pub_seq0);
+\dRp+ regress_pub_for_allsequences_alltables1
+RESET client_min_messages;
+
+DROP SEQUENCE regress_pub_seq0, pub_test.regress_pub_seq1, pub_test.regress_pub_seq2;
 DROP PUBLICATION regress_pub_forallsequences1;
 DROP PUBLICATION regress_pub_forallsequences2;
+DROP PUBLICATION regress_pub_forallsequences3;
 DROP PUBLICATION regress_pub_for_allsequences_alltables;
+DROP PUBLICATION regress_pub_for_allsequences_alltables1;
+DROP TABLE tab_seq;
 
 -- fail - Specifying ALL TABLES more than once
 CREATE PUBLICATION regress_pub_for_allsequences_alltables FOR ALL SEQUENCES, ALL TABLES, ALL TABLES;
