@@ -268,25 +268,38 @@ CREATE PUBLICATION regress_pub_forallsequences_except FOR ALL SEQUENCES EXCEPT (
 -- another schema.
 ALTER SEQUENCE regress_seq2 SET SCHEMA pub_test;
 \dRp+ regress_pub_forallsequences_except
+
+-- Modify the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq0);
+\dRp+ regress_pub_forallsequences_except
+
+-- Clear the sequence list in the EXCEPT clause
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES;
+\dRp+ regress_pub_forallsequences_except
 RESET client_min_messages;
 
 -- fail - first sequence in the EXCEPT list should use SEQUENCE keyword
 CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (regress_seq0, pub_test.regress_seq1);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (regress_seq0, pub_test.regress_seq1);
 
 -- fail - unlogged sequence is specified in EXCEPT sequence list
 CREATE UNLOGGED SEQUENCE regress_seq_unlogged;
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_unlogged);
 
 -- fail - temporary sequence is specified in EXCEPT sequence list
 CREATE TEMPORARY SEQUENCE regress_seq_temp;
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE regress_seq_temp);
 
 -- fail - sequence object is specified in EXCEPT table list
 CREATE PUBLICATION regress_pub_should_fail FOR ALL TABLES EXCEPT (TABLE regress_seq0);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL TABLES EXCEPT (TABLE regress_seq0);
 
 -- fail - table object is specified in EXCEPT sequence list
 CREATE TABLE tab1(a int);
 CREATE PUBLICATION regress_pub_should_fail FOR ALL SEQUENCES EXCEPT (SEQUENCE tab1);
+ALTER PUBLICATION regress_pub_forallsequences_except SET ALL SEQUENCES EXCEPT (SEQUENCE tab1);
 
 -- Test combination of ALL SEQUENCES and ALL TABLES with EXCEPT clause
 SET client_min_messages = 'ERROR';
