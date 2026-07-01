@@ -58,6 +58,7 @@
 #include "nodes/makefuncs.h"
 #include "nodes/nodeFuncs.h"
 #include "parser/parser.h"
+#include "utils/builtins.h"
 #include "utils/datetime.h"
 #include "utils/xml.h"
 
@@ -11272,7 +11273,7 @@ AlterOwnerStmt: ALTER AGGREGATE aggregate_with_argtypes OWNER TO RoleSpec
  * pub_obj is one of:
  *
  *		TABLE table [, ...]
- *		TABLES IN SCHEMA schema [, ...]
+ *		TABLES IN SCHEMA schema [EXCEPT (TABLE table [, ...] )] [, ...]
  *
  *****************************************************************************/
 
@@ -11332,23 +11333,26 @@ PublicationObjSpec:
 					$$->pubtable->columns = $3;
 					$$->pubtable->whereClause = $4;
 				}
-			| TABLES IN_P SCHEMA ColId
+			| TABLES IN_P SCHEMA ColId opt_pub_except_clause
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_TABLES_IN_SCHEMA;
 					$$->name = $4;
+					$$->except_tables = $5;
 					$$->location = @4;
 				}
-			| TABLES IN_P SCHEMA CURRENT_SCHEMA
+			| TABLES IN_P SCHEMA CURRENT_SCHEMA opt_pub_except_clause
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_TABLES_IN_CUR_SCHEMA;
+					$$->except_tables = $5;
 					$$->location = @4;
 				}
-			| ColId opt_column_list OptWhereClause
+			| ColId opt_column_list OptWhereClause opt_pub_except_clause
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_CONTINUATION;
+					$$->except_tables = $4;
 					/*
 					 * If either a row filter or column list is specified, create
 					 * a PublicationTable object.
@@ -11392,10 +11396,11 @@ PublicationObjSpec:
 					$$->pubtable->columns = $2;
 					$$->pubtable->whereClause = $3;
 				}
-			| CURRENT_SCHEMA
+			| CURRENT_SCHEMA opt_pub_except_clause
 				{
 					$$ = makeNode(PublicationObjSpec);
 					$$->pubobjtype = PUBLICATIONOBJ_CONTINUATION;
+					$$->except_tables = $2;
 					$$->location = @1;
 				}
 				;
@@ -20784,6 +20789,8 @@ preprocess_pub_all_objtype_list(List *all_objects_list, List **pubobjects,
 /*
  * Process pubobjspec_list to check for errors in any of the objects and
  * convert PUBLICATIONOBJ_CONTINUATION into appropriate PublicationObjSpecType.
+ * Also flattens except_tables from TABLES IN SCHEMA nodes into the list so
+ * that ObjectsInPublicationToOids() sees them as top-level EXCEPT_TABLE entries.
  */
 static void
 preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
@@ -20812,6 +20819,13 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 
 		if (pubobj->pubobjtype == PUBLICATIONOBJ_TABLE)
 		{
+			/* EXCEPT is not valid for table objects */
+			if (pubobj->except_tables != NIL)
+				ereport(ERROR,
+						errcode(ERRCODE_SYNTAX_ERROR),
+						errmsg("EXCEPT is not allowed for TABLE publication objects"),
+						parser_errposition(pubobj->location));
+
 			/* relation name or pubtable must be set for this type of object */
 			if (!pubobj->name && !pubobj->pubtable)
 				ereport(ERROR,
@@ -20860,6 +20874,36 @@ preprocess_pubobj_list(List *pubobjspec_list, core_yyscan_t yyscanner)
 						errcode(ERRCODE_SYNTAX_ERROR),
 						errmsg("invalid schema name"),
 						parser_errposition(pubobj->location));
+
+			/*
+			 * For TABLES_IN_SCHEMA, qualify unqualified EXCEPT table names
+			 * with the parent schema and reject cross-schema entries at parse
+			 * time, then flatten into the top-level list.
+			 *
+			 * For TABLES_IN_CUR_SCHEMA the schema name is not yet known, so
+			 * skip both steps here; ObjectsInPublicationToOids() will
+			 * qualify names and validate schema membership at execution time.
+			 */
+			if (pubobj->pubobjtype == PUBLICATIONOBJ_TABLES_IN_SCHEMA)
+			{
+				foreach_ptr(PublicationObjSpec, eobj, pubobj->except_tables)
+				{
+					const char *eobj_schemaname = eobj->pubtable->relation->schemaname;
+					const char *eobj_relname = eobj->pubtable->relation->relname;
+
+					if (eobj_schemaname == NULL)
+						eobj->pubtable->relation->schemaname = pubobj->name;
+					else if (strcmp(eobj_schemaname, pubobj->name) != 0)
+						ereport(ERROR,
+								errcode(ERRCODE_INVALID_OBJECT_DEFINITION),
+								errmsg("table \"%s\" in EXCEPT clause does not belong to schema \"%s\"",
+									   quote_qualified_identifier(eobj_schemaname, eobj_relname),
+									   pubobj->name),
+								parser_errposition(eobj->location));
+				}
+				pubobjspec_list = list_concat(pubobjspec_list, pubobj->except_tables);
+				pubobj->except_tables = NIL;
+			}
 		}
 
 		prevobjtype = pubobj->pubobjtype;
