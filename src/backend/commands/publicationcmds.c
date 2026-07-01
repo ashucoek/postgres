@@ -66,7 +66,8 @@ static void CloseTableList(List *rels);
 static void LockSchemaList(List *schemalist);
 static void PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
 								 AlterPublicationStmt *stmt);
-static void PublicationDropTables(Oid pubid, List *rels, bool missing_ok);
+static void PublicationDropTables(Oid pubid, List *rels, bool missing_ok,
+								  bool delete_excluded);
 static void PublicationAddSchemas(Oid pubid, List *schemas, bool if_not_exists,
 								  AlterPublicationStmt *stmt);
 static void PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok);
@@ -1360,7 +1361,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		PublicationAddTables(pubid, rels, false, stmt);
 	}
 	else if (stmt->action == AP_DropObjects)
-		PublicationDropTables(pubid, rels, false);
+		PublicationDropTables(pubid, rels, false, false);
 	else						/* AP_SetObjects */
 	{
 		List	   *oldrelids = NIL;
@@ -1495,7 +1496,7 @@ AlterPublicationTables(AlterPublicationStmt *stmt, HeapTuple tup,
 		}
 
 		/* And drop them. */
-		PublicationDropTables(pubid, delrels, true);
+		PublicationDropTables(pubid, delrels, true, true);
 
 		/*
 		 * Don't bother calculating the difference for adding, we'll catch and
@@ -1597,8 +1598,8 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
 
 	/*
 	 * Increment the command counter so that is_schema_publication() in
-	 * GetExcludedPublicationTables() can see the just-inserted schema
-	 * rows when AlterPublicationSchemaExceptTables runs next.
+	 * GetExcludedPublicationTables() can see the just-inserted schema rows
+	 * when AlterPublicationSchemaExceptTables runs next.
 	 */
 	if (stmt->action == AP_AddObjects || stmt->action == AP_SetObjects)
 		CommandCounterIncrement();
@@ -1616,16 +1617,18 @@ AlterPublicationSchemas(AlterPublicationStmt *stmt,
  */
 static void
 AlterPublicationSchemaExceptTables(AlterPublicationStmt *stmt,
-							 HeapTuple tup, List *except_pubtables,
-							 List *schemaidlist)
+								   HeapTuple tup, List *except_pubtables,
+								   List *schemaidlist)
 {
 	Form_pg_publication pubform = (Form_pg_publication) GETSTRUCT(tup);
 	Oid			pubid = pubform->oid;
 
 	/*
-	 * Nothing to do if no EXCEPT entries.
+	 * Nothing to do if there are no EXCEPT entries, unless handling the SET
+	 * command, because if the user has removed all exceptions we need to drop
+	 * any existing ones.
 	 */
-	if (!except_pubtables)
+	if (!except_pubtables && stmt->action != AP_SetObjects)
 		return;
 
 	/*
@@ -1646,16 +1649,6 @@ AlterPublicationSchemaExceptTables(AlterPublicationStmt *stmt,
 				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
 				 errmsg("EXCEPT clause is not supported with DROP in ALTER PUBLICATION")));
 
-	/*
-	 * XXX EXCEPT with SET is not currently implemented.  Workaround: DROP and
-	 * re-ADD the schema with the desired EXCEPT list.
-	 */
-	if (stmt->action == AP_SetObjects)
-		ereport(ERROR,
-				(errcode(ERRCODE_FEATURE_NOT_SUPPORTED),
-				 errmsg("EXCEPT clause is not supported with SET in ALTER PUBLICATION"),
-				 errhint("Drop and re-add the schema with the desired EXCEPT list.")));
-
 	if (stmt->action == AP_AddObjects)
 	{
 		List	   *rels;
@@ -1673,6 +1666,75 @@ AlterPublicationSchemaExceptTables(AlterPublicationStmt *stmt,
 		CheckExceptNotInTableList(rels, explicitrelids);
 
 		PublicationAddTables(pubid, rels, false, stmt);
+
+		CloseTableList(rels);
+	}
+	else						/* AP_SetObjects */
+	{
+		List	   *oldexceptrelids = NIL;
+		List	   *newexceptrelids = NIL;
+		List	   *delrelids = NIL;
+		List	   *rels;
+		List	   *explicitrelids;
+
+		rels = OpenTableList(except_pubtables);
+
+		/* Collect OIDs of the desired new EXCEPT list. */
+		foreach_ptr(PublicationRelInfo, pri, rels)
+			newexceptrelids = lappend_oid(newexceptrelids,
+										  RelationGetRelid(pri->relation));
+
+		explicitrelids = GetIncludedPublicationRelations(pubid,
+														 PUBLICATION_PART_ROOT);
+
+		/*
+		 * Validate that each excluded table is not also in the explicit table
+		 * list (which would be contradictory).
+		 */
+		CheckExceptNotInTableList(rels, explicitrelids);
+
+		/*
+		 * Get the current set of EXCEPT entries.  Only FOR ALL TABLES and
+		 * schema-level publications can have EXCEPT entries; for any other
+		 * publication type oldexceptrelids stays NIL.
+		 *
+		 * Note: we check is_schema_publication() against the current catalog
+		 * state (before AlterPublicationSchemas has run), so if the caller is
+		 * doing SET TABLE t1 to convert a schema publication into a plain
+		 * table publication, is_schema_publication() still returns true here.
+		 * That is intentional: it lets us discover and clean up any stale
+		 * EXCEPT entries that belong to the old schema definition.
+		 */
+		if (GetPublication(pubid)->alltables || is_schema_publication(pubid))
+			oldexceptrelids = GetExcludedPublicationTables(pubid,
+														   PUBLICATION_PART_ROOT);
+
+		/* Build a list of old EXCEPT entries not present in the new list. */
+		foreach_oid(oldrelid, oldexceptrelids)
+		{
+			if (!list_member_oid(newexceptrelids, oldrelid))
+				delrelids = lappend_oid(delrelids, oldrelid);
+		}
+
+		/* Drop old EXCEPT entries not present in the new list. */
+		foreach_oid(relid, delrelids)
+		{
+			Oid			proid;
+			ObjectAddress obj;
+
+			proid = GetSysCacheOid2(PUBLICATIONRELMAP,
+									Anum_pg_publication_rel_oid,
+									ObjectIdGetDatum(relid),
+									ObjectIdGetDatum(pubid));
+			if (OidIsValid(proid))
+			{
+				ObjectAddressSet(obj, PublicationRelRelationId, proid);
+				performDeletion(&obj, DROP_CASCADE, 0);
+			}
+		}
+
+		/* Add new EXCEPT entries, skipping any already present. */
+		PublicationAddTables(pubid, rels, true, stmt);
 
 		CloseTableList(rels);
 	}
@@ -2297,29 +2359,54 @@ PublicationAddTables(Oid pubid, List *rels, bool if_not_exists,
 
 /*
  * Remove listed tables from the publication.
+ *
+ * delete_excluded controls how EXCEPT (prexcept=true) rows are handled:
+ *   true  - delete them silently.  Used by the SET path to clear stale
+ *           EXCEPT rows that are being replaced by a new EXCEPT list.
+ *   false - treat them as "not a member". Used by ALTER ... DROP TABLE: an
+ *           EXCEPT entry is not something DROP TABLE is expected to remove.
  */
 static void
-PublicationDropTables(Oid pubid, List *rels, bool missing_ok)
+PublicationDropTables(Oid pubid, List *rels, bool missing_ok,
+					  bool delete_excluded)
 {
 	ObjectAddress obj;
 	ListCell   *lc;
-	Oid			prid;
 
 	foreach(lc, rels)
 	{
 		PublicationRelInfo *pubrel = (PublicationRelInfo *) lfirst(lc);
 		Relation	rel = pubrel->relation;
 		Oid			relid = RelationGetRelid(rel);
+		HeapTuple	tup;
+		Form_pg_publication_rel pubrelform;
+		Oid			prid = InvalidOid;
+		bool		is_except = false;
 
 		if (pubrel->columns)
 			ereport(ERROR,
 					errcode(ERRCODE_SYNTAX_ERROR),
 					errmsg("column list must not be specified in ALTER PUBLICATION ... DROP"));
 
-		prid = GetSysCacheOid2(PUBLICATIONRELMAP, Anum_pg_publication_rel_oid,
-							   ObjectIdGetDatum(relid),
-							   ObjectIdGetDatum(pubid));
-		if (!OidIsValid(prid))
+		tup = SearchSysCache2(PUBLICATIONRELMAP,
+							  ObjectIdGetDatum(relid),
+							  ObjectIdGetDatum(pubid));
+		if (HeapTupleIsValid(tup))
+		{
+			pubrelform = (Form_pg_publication_rel) GETSTRUCT(tup);
+			is_except = pubrelform->prexcept;
+			prid = pubrelform->oid;
+			ReleaseSysCache(tup);
+		}
+
+		/*
+		 * DROP TABLE operates only on regular member rows.  A missing row
+		 * or an EXCEPT row both mean "not a member" from the user's
+		 * perspective, so we treat them the same way.  The SET-cleanup
+		 * caller (delete_excluded = true) intends to remove EXCEPT rows
+		 * and so bypasses the EXCEPT half of this check.
+		 */
+		if (!OidIsValid(prid) || (is_except && !delete_excluded))
 		{
 			if (missing_ok)
 				continue;
@@ -2379,6 +2466,7 @@ PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok)
 	foreach(lc, schemas)
 	{
 		Oid			schemaid = lfirst_oid(lc);
+		List	   *except_relids;
 
 		psid = GetSysCacheOid2(PUBLICATIONNAMESPACEMAP,
 							   Anum_pg_publication_namespace_oid,
@@ -2395,8 +2483,40 @@ PublicationDropSchemas(Oid pubid, List *schemas, bool missing_ok)
 							get_namespace_name(schemaid))));
 		}
 
+		/*
+		 * Collect EXCEPT entries for tables belonging to this schema before
+		 * removing the schema entry.
+		 */
+		except_relids = GetExcludedPublicationTables(pubid, PUBLICATION_PART_ROOT);
+
 		ObjectAddressSet(obj, PublicationNamespaceRelationId, psid);
 		performDeletion(&obj, DROP_CASCADE, 0);
+
+		/*
+		 * Drop any prexcept rows for tables belonging to this schema. These
+		 * rows have no pg_depend entry pointing at the
+		 * pg_publication_namespace row, so they are not cascaded by the
+		 * performDeletion() call above and must be cleaned up explicitly.
+		 */
+		foreach_oid(relid, except_relids)
+		{
+			Oid			proid;
+
+			if (get_rel_namespace(relid) != schemaid)
+				continue;
+
+			proid = GetSysCacheOid2(PUBLICATIONRELMAP,
+									Anum_pg_publication_rel_oid,
+									ObjectIdGetDatum(relid),
+									ObjectIdGetDatum(pubid));
+			if (OidIsValid(proid))
+			{
+				ObjectAddressSet(obj, PublicationRelRelationId, proid);
+				performDeletion(&obj, DROP_CASCADE, 0);
+			}
+		}
+
+		list_free(except_relids);
 	}
 }
 
