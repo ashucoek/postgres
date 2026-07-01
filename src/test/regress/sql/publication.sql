@@ -290,12 +290,30 @@ CREATE PUBLICATION testpub_except_partition
 CREATE PUBLICATION testpub_except_nokw
     FOR TABLES IN SCHEMA pub_test EXCEPT (testpub_nopk);
 
+---------------------------------------------
+-- EXCEPT tests for ALTER PUBLICATION
+---------------------------------------------
+CREATE PUBLICATION testpub_alter_except;
+
+-- fail: non-existing table in EXCEPT clause
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE pub_test.nonexistent_table);
+
+-- fail: EXCEPT table belongs to a different schema
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE public.testpub_tbl1);
+
+-- fail: TABLE keyword is required for the first entry in EXCEPT clause
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (testpub_nopk);
+
+-- ADD: qualified and unqualified names; unqualified is implicitly qualified with the schema
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE pub_test.testpub_tbl_s1, testpub_tbl_s2);
+\dRp+ testpub_alter_except
+
 -- Cleanup
 RESET client_min_messages;
 DROP TABLE pub_test.testpub_tbl_s1, pub_test.testpub_tbl_s2;
 DROP TABLE pub_test.testpub_parted_s CASCADE;
 DROP TABLE testpub_nopk, testpub_tbl_s1;
-DROP PUBLICATION testpub_schema_except1, testpub_schema_except2, testpub_schema_except_multi;
+DROP PUBLICATION testpub_schema_except1, testpub_schema_except2, testpub_schema_except_multi, testpub_alter_except;
 
 ---------------------------------------------
 -- Tests for publications with SEQUENCES

@@ -657,15 +657,18 @@ publication_add_relation(Oid pubid, PublicationRelInfo *pri,
 	 * here, as CreatePublication() function invalidates all relations as part
 	 * of defining a FOR ALL TABLES publication.
 	 *
-	 * For ALTER PUBLICATION, invalidation is needed only when adding an
-	 * EXCEPT table to a publication already marked as ALL TABLES. For
-	 * publications that were originally empty or defined as ALL SEQUENCES and
-	 * are being converted to ALL TABLES, invalidation is skipped here, as
-	 * AlterPublicationAllFlags() function invalidates all relations while
-	 * marking the publication as ALL TABLES publication.
+	 * For ALTER PUBLICATION, invalidation is needed when adding an EXCEPT
+	 * table to either a FOR ALL TABLES publication (pub->alltables is true)
+	 * or a FOR TABLES IN SCHEMA publication (is_schema_publication is true).
+	 * The exception: when a publication is being converted to FOR ALL TABLES
+	 * (pub->alltables is still false at this point),
+	 * AlterPublicationAllFlags() will perform a full invalidation, so we skip
+	 * it here.
 	 */
-	inval_except_table = (alter_stmt != NULL) && pub->alltables &&
-		(alter_stmt->for_all_tables && pri->except);
+	inval_except_table = (alter_stmt != NULL) && pri->except &&
+		(pub->alltables
+		 ? alter_stmt->for_all_tables
+		 : is_schema_publication(pubid));
 
 	if (!pri->except || inval_except_table)
 	{

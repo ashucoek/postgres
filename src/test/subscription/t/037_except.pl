@@ -347,6 +347,38 @@ is($result, qq(5),
 $node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sch_sub');
 $node_publisher->safe_psql('postgres', 'DROP PUBLICATION sch_pub');
 
+# ============================================
+# ALTER PUBLICATION EXCEPT for TABLES IN SCHEMA
+# ============================================
+
+# Truncate subscriber tables to remove data accumulated from previous tests.
+$node_subscriber->safe_psql('postgres',
+	'TRUNCATE sch1.tab_published, sch1.tab_excluded, sch1.parent, sch1.child');
+
+# ADD: add a schema with an excepted table; verify the except entry takes effect.
+$node_publisher->safe_psql('postgres', "CREATE PUBLICATION sch_pub");
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION sch_pub ADD TABLES IN SCHEMA sch1 EXCEPT (TABLE sch1.tab_excluded)"
+);
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sch_sub CONNECTION '$publisher_connstr' PUBLICATION sch_pub"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_published");
+is($result, qq(6),
+	'ALTER ... ADD TABLES IN SCHEMA EXCEPT: included table synced');
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_excluded");
+is($result, qq(0),
+	'ALTER ... ADD TABLES IN SCHEMA EXCEPT: excluded table not synced');
+
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sch_sub');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION sch_pub');
+
 # Cleanup schema tables before the multi-publication section.
 $node_publisher->safe_psql('postgres', 'DROP SCHEMA sch1 CASCADE');
 $node_subscriber->safe_psql('postgres', 'DROP SCHEMA sch1 CASCADE');
