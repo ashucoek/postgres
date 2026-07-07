@@ -31,7 +31,7 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
 <phrase>where <replaceable class="parameter">publication_object</replaceable> is one of:</phrase>
 
     TABLE <replaceable class="parameter">table_and_columns</replaceable> [, ... ]
-    TABLES IN SCHEMA { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [, ... ]
+    TABLES IN SCHEMA <replaceable class="parameter">tables_in_schema</replaceable> [, ... ]
 
 <phrase>and <replaceable class="parameter">publication_all_object</replaceable> is one of:</phrase>
 
@@ -46,6 +46,10 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
 <phrase>and <replaceable class="parameter">table_and_columns</replaceable> is:</phrase>
 
     <replaceable class="parameter">table_object</replaceable> [ ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) ] [ WHERE ( <replaceable class="parameter">expression</replaceable> ) ]
+
+<phrase>and <replaceable class="parameter">tables_in_schema</replaceable> is:</phrase>
+
+    { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [ EXCEPT ( <replaceable class="parameter">except_table_object</replaceable> [, ... ] ) ]
 
 <phrase>and <replaceable class="parameter">except_table_object</replaceable> is:</phrase>
 
@@ -69,6 +73,9 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
    The first two variants modify which tables/schemas are part of the
    publication. The <literal>ADD</literal> and <literal>DROP</literal> clauses
    will add and remove one or more tables/schemas from the publication.
+   The <literal>EXCEPT</literal> clause can be used with
+   <literal>ADD TABLES IN SCHEMA</literal> to exclude specific tables from a
+   schema-level publication.
   </para>
 
   <para>
@@ -93,7 +100,11 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
    used with a publication defined with <literal>FOR TABLE</literal> or
    <literal>FOR TABLES IN SCHEMA</literal>, replaces the list of tables/schemas
    in the publication with the specified list; the existing tables or schemas
-   that were present in the publication will be removed.
+   that were present in the publication will be removed.  When
+   <literal>SET TABLES IN SCHEMA</literal> is used with an
+   <literal>EXCEPT</literal> clause, the excluded tables for each schema are
+   replaced with the specified list; if <literal>EXCEPT</literal> is omitted
+   for a schema, any existing exclusions for that schema are cleared.
   </para>
 
   <para>
@@ -199,6 +210,27 @@ ALTER PUBLICATION <replaceable class="parameter">name</replaceable> RENAME TO <r
    </varlistentry>
 
    <varlistentry>
+    <term><literal>EXCEPT</literal></term>
+    <listitem>
+     <para>
+      When used with <literal>ADD TABLES IN SCHEMA</literal>
+      or <literal>SET TABLES IN SCHEMA</literal>, specifies
+      tables to be excluded from the publication.  Each named
+      table must belong to the schema specified in the same
+      <literal>TABLES IN SCHEMA</literal> clause.  Table names may be
+      schema-qualified or unqualified; unqualified names are implicitly
+      qualified with the schema named in the same clause.  See
+      <xref linkend="sql-createpublication"/> for further details on the
+      semantics of <literal>EXCEPT</literal>.
+     </para>
+     <para>
+      Dropping a table always removes it from the <literal>EXCEPT</literal>
+      clause.
+     </para>
+    </listitem>
+   </varlistentry>
+
+   <varlistentry>
     <term><literal>SET ( <replaceable class="parameter">publication_parameter</replaceable> [= <replaceable class="parameter">value</replaceable>] [, ... ] )</literal></term>
     <listitem>
      <para>
@@ -285,6 +317,28 @@ ALTER PUBLICATION mypublication SET ALL TABLES;
    <structname>sales_publication</structname>:
 <programlisting>
 ALTER PUBLICATION sales_publication ADD TABLES IN SCHEMA marketing, sales;
+</programlisting>
+  </para>
+
+  <para>
+   Add schema <structname>sales</structname> to the publication
+   <structname>sales_publication</structname>, excluding the
+   <structname>sales.internal</structname> and
+   <structname>sales.drafts</structname> tables:
+<programlisting>
+ALTER PUBLICATION sales_publication ADD TABLES IN SCHEMA sales EXCEPT (TABLE internal, drafts);
+</programlisting>
+  </para>
+
+  <para>
+   Replace the schema list of <structname>sales_publication</structname> with
+   <structname>sales</structname>, excluding only
+   <structname>sales.drafts</structname>. Other than
+   <structname>sales.drafts</structname>, any previously excluded tables for schema
+   <structname>sales</structname> are no longer excluded. Any schemas previously in
+   <structname>sales_publication</structname> are removed:
+<programlisting>
+ALTER PUBLICATION sales_publication SET TABLES IN SCHEMA sales EXCEPT (TABLE drafts);
 </programlisting>
   </para>
 
