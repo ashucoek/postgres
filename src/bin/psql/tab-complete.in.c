@@ -2376,6 +2376,23 @@ match_previous_words(int pattern_id,
 	}
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, "ADD", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "(", "TABLE", MatchAnyN) && !ends_with(prev_wd, ','))
 		COMPLETE_WITH(")");
+	/* After a single schema name in SET context, offer EXCEPT ( TABLE */
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "TABLES", "IN", "SCHEMA", MatchAny) &&
+			 !ends_with(prev_wd, ','))
+		COMPLETE_WITH("EXCEPT ( TABLE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT"))
+		COMPLETE_WITH("( TABLE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "("))
+		COMPLETE_WITH("TABLE");
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "TABLES", "IN", "SCHEMA", "CURRENT_SCHEMA", "EXCEPT", "(", "TABLE"))
+		COMPLETE_WITH_QUERY_VERBATIM(Query_for_list_of_tables_in_current_schema);
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "(", "TABLE"))
+	{
+		set_completion_reference(prev4_wd);
+		COMPLETE_WITH_QUERY_VERBATIM(Query_for_list_of_tables_in_schema);
+	}
+	else if (Matches("ALTER", "PUBLICATION", MatchAny, "SET", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "(", "TABLE", MatchAnyN) && !ends_with(prev_wd, ','))
+		COMPLETE_WITH(")");
 	/* ALTER PUBLICATION <name> SET ( */
 	else if (Matches("ALTER", "PUBLICATION", MatchAny, MatchAnyN, "SET", "("))
 		COMPLETE_WITH("publish", "publish_generated_columns", "publish_via_partition_root");
