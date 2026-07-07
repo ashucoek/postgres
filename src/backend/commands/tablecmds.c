@@ -63,6 +63,7 @@
 #include "commands/event_trigger.h"
 #include "commands/extension.h"
 #include "commands/repack.h"
+#include "commands/publicationcmds.h"
 #include "commands/sequence.h"
 #include "commands/tablecmds.h"
 #include "commands/tablespace.h"
@@ -19568,6 +19569,16 @@ AlterTableNamespaceInternal(Relation rel, Oid oldNspOid, Oid nspOid,
 					   objsMoved, AccessExclusiveLock);
 	AlterConstraintNamespaces(RelationGetRelid(rel), oldNspOid, nspOid,
 							  false, objsMoved);
+
+	/*
+	 * Remove any EXCEPT clause entries for this relation from schema
+	 * publications.  A schema-scoped exclusion is no longer meaningful once
+	 * the table moves to a different schema.
+	 */
+	if (rel->rd_rel->relkind == RELKIND_RELATION ||
+		rel->rd_rel->relkind == RELKIND_PARTITIONED_TABLE)
+		RemoveSchemaPubExceptForRel(RelationGetRelid(rel), oldNspOid,
+									nspOid);
 
 	table_close(classRel, RowExclusiveLock);
 }

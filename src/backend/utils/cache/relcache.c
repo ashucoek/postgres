@@ -5845,16 +5845,29 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 	/* Fetch the publication membership info. */
 	puboids = GetRelationIncludedPublications(relid);
 	schemaid = RelationGetNamespace(relation);
-	puboids = list_concat_unique_oid(puboids, GetSchemaPublications(schemaid));
 
 	if (relation->rd_rel->relispartition)
 	{
-		Oid			last_ancestor_relid;
-
-		/* Add publications that the ancestors are in too. */
 		ancestors = get_partition_ancestors(relid);
-		last_ancestor_relid = llast_oid(ancestors);
+		exceptpuboids = GetRelationExcludedPublications(llast_oid(ancestors));
+	}
+	else
+		exceptpuboids = GetRelationExcludedPublications(relid);
 
+	/*
+	 * Subtract exceptpuboids from the schema-publication contribution so that
+	 * a relation EXCEPT'd from a schema publication does not inherit that
+	 * publication's pubactions.  Without this filter,
+	 * CheckCmdReplicaIdentity() would demand REPLICA IDENTITY for
+	 * UPDATE/DELETE even on a explicitly excluded table.
+	 */
+	puboids = list_concat_unique_oid(puboids,
+									 list_difference_oid(GetSchemaPublications(schemaid),
+														 exceptpuboids));
+
+	if (relation->rd_rel->relispartition)
+	{
+		/* Add publications that the ancestors are in too. */
 		foreach(lc, ancestors)
 		{
 			Oid			ancestor = lfirst_oid(lc);
@@ -5863,23 +5876,9 @@ RelationBuildPublicationDesc(Relation relation, PublicationDesc *pubdesc)
 											 GetRelationIncludedPublications(ancestor));
 			schemaid = get_rel_namespace(ancestor);
 			puboids = list_concat_unique_oid(puboids,
-											 GetSchemaPublications(schemaid));
+											 list_difference_oid(GetSchemaPublications(schemaid),
+																 exceptpuboids));
 		}
-
-		/*
-		 * Only the top-most ancestor can appear in the EXCEPT clause.
-		 * Therefore, for a partition, exclusion must be evaluated at the
-		 * top-most ancestor.
-		 */
-		exceptpuboids = GetRelationExcludedPublications(last_ancestor_relid);
-	}
-	else
-	{
-		/*
-		 * For a regular table or a root partitioned table, check exclusion on
-		 * table itself.
-		 */
-		exceptpuboids = GetRelationExcludedPublications(relid);
 	}
 
 	alltablespuboids = GetAllTablesPublications();

@@ -4489,6 +4489,8 @@ typedef struct PublicationObjSpec
 	PublicationObjSpecType pubobjtype;	/* type of this publication object */
 	char	   *name;
 	PublicationTable *pubtable;
+	List	   *except_tables;	/* tables specified in the EXCEPT clause (for
+								 * TABLES IN SCHEMA) */
 	ParseLoc	location;		/* token location, or -1 if unknown */
 } PublicationObjSpec;
 

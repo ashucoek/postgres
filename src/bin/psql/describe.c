@@ -6815,6 +6815,24 @@ describePublications(const char *pattern)
 				if (!addFooterToPublicationDesc(&buf, _("Tables from schemas:"),
 												true, &cont))
 					goto error_return;
+
+				if (pset.sversion >= 190000)
+				{
+					/*
+					 * Get tables in the EXCEPT clause for this schema
+					 * publication.
+					 */
+					printfPQExpBuffer(&buf,
+									  "SELECT concat(c.relnamespace::regnamespace, '.', c.relname)\n"
+									  "FROM pg_catalog.pg_class c\n"
+									  "     JOIN pg_catalog.pg_publication_rel pr ON c.oid = pr.prrelid\n"
+									  "WHERE pr.prpubid = '%s'\n"
+									  "  AND pr.prexcept\n"
+									  "ORDER BY 1", pubid);
+					if (!addFooterToPublicationDesc(&buf, _("Except tables:"),
+													true, &cont))
+						goto error_return;
+				}
 			}
 		}
 		else

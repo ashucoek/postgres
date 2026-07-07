@@ -1065,6 +1065,24 @@ static const SchemaQuery Query_for_trigger_of_table = {
 "SELECT nspname FROM pg_catalog.pg_namespace "\
 " WHERE nspname LIKE '%s'"
 
+#define Query_for_list_of_tables_in_schema \
+"SELECT n.nspname || '.' || c.relname "\
+"  FROM pg_catalog.pg_class c "\
+"       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "\
+" WHERE c.relkind IN (" CppAsString2(RELKIND_RELATION) ", " \
+						CppAsString2(RELKIND_PARTITIONED_TABLE) ") "\
+"   AND (n.nspname || '.' || c.relname) LIKE '%s' "\
+"   AND n.nspname = '%s'"
+
+#define Query_for_list_of_tables_in_current_schema \
+"SELECT c.relname "\
+"  FROM pg_catalog.pg_class c "\
+"       JOIN pg_catalog.pg_namespace n ON n.oid = c.relnamespace "\
+" WHERE c.relkind IN (" CppAsString2(RELKIND_RELATION) ", " \
+						CppAsString2(RELKIND_PARTITIONED_TABLE) ") "\
+"   AND c.relname LIKE '%s' "\
+"   AND n.nspname = pg_catalog.current_schema()"
+
 /* Use COMPLETE_WITH_QUERY_VERBATIM with these queries for GUC names: */
 #define Query_for_list_of_alter_system_set_vars \
 "SELECT pg_catalog.lower(name) FROM pg_catalog.pg_settings "\
@@ -3774,8 +3792,21 @@ match_previous_words(int pattern_id,
 		COMPLETE_WITH_QUERY_PLUS(Query_for_list_of_schemas
 								 " AND nspname NOT LIKE E'pg\\\\_%%'",
 								 "CURRENT_SCHEMA");
-	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny) && (!ends_with(prev_wd, ',')))
-		COMPLETE_WITH("WITH (");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny) && !ends_with(prev_wd, ','))
+		COMPLETE_WITH("EXCEPT ( TABLE", "WITH (");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT"))
+		COMPLETE_WITH("( TABLE");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "("))
+		COMPLETE_WITH("TABLE");
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", "CURRENT_SCHEMA", "EXCEPT", "(", "TABLE"))
+		COMPLETE_WITH_QUERY_VERBATIM(Query_for_list_of_tables_in_current_schema);
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "(", "TABLE"))
+	{
+		set_completion_reference(prev4_wd);
+		COMPLETE_WITH_QUERY_VERBATIM(Query_for_list_of_tables_in_schema);
+	}
+	else if (Matches("CREATE", "PUBLICATION", MatchAny, "FOR", "TABLES", "IN", "SCHEMA", MatchAny, "EXCEPT", "(", "TABLE", MatchAnyN) && !ends_with(prev_wd, ','))
+		COMPLETE_WITH(")");
 	/* Complete "CREATE PUBLICATION <name> [...] WITH" */
 	else if (Matches("CREATE", "PUBLICATION", MatchAnyN, "WITH", "("))
 		COMPLETE_WITH("publish", "publish_generated_columns", "publish_via_partition_root");
