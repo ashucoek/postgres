@@ -600,12 +600,42 @@ ERROR:  cannot add table "pub_test.testpub_part_s" to publication "testpub_excep
 DETAIL:  Partition ancestor "pub_test.testpub_parted_s" of table "pub_test.testpub_part_s" is currently listed in the EXCEPT clause of the publication.
 HINT:  Change EXCEPT list using ALTER PUBLICATION ... SET TABLES IN SCHEMA ... EXCEPT.
 DROP PUBLICATION testpub_except_ancestor;
+---------------------------------------------
+-- EXCEPT tests for ALTER PUBLICATION
+---------------------------------------------
+CREATE PUBLICATION testpub_alter_except;
+-- fail: non-existing table in EXCEPT clause
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE pub_test.nonexistent_table);
+ERROR:  relation "pub_test.nonexistent_table" does not exist
+-- fail: EXCEPT table belongs to a different schema
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE public.testpub_tbl1);
+ERROR:  table "public.testpub_tbl1" in EXCEPT clause does not belong to schema "pub_test"
+LINE 1: ...xcept ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE public.tes...
+                                                             ^
+-- fail: TABLE keyword is required for the first entry in EXCEPT clause
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (testpub_nopk);
+ERROR:  syntax error at or near "testpub_nopk"
+LINE 1: ...lter_except ADD TABLES IN SCHEMA pub_test EXCEPT (testpub_no...
+                                                             ^
+-- ADD: qualified and unqualified names; unqualified is implicitly qualified with the schema
+ALTER PUBLICATION testpub_alter_except ADD TABLES IN SCHEMA pub_test EXCEPT (TABLE pub_test.testpub_tbl_s1, testpub_tbl_s2);
+\dRp+ testpub_alter_except
+                                                       Publication testpub_alter_except
+          Owner           | All tables | All sequences | Inserts | Updates | Deletes | Truncates | Generated columns | Via root | Description 
+--------------------------+------------+---------------+---------+---------+---------+-----------+-------------------+----------+-------------
+ regress_publication_user | f          | f             | t       | t       | t       | t         | none              | f        | 
+Tables from schemas:
+    "pub_test"
+Except tables:
+    "pub_test.testpub_tbl_s1"
+    "pub_test.testpub_tbl_s2"
+
 -- Cleanup
 RESET client_min_messages;
 DROP TABLE pub_test.testpub_tbl_s1, pub_test.testpub_tbl_s2;
 DROP TABLE pub_test.testpub_parted_s CASCADE;
 DROP TABLE testpub_nopk, testpub_tbl_s1;
-DROP PUBLICATION testpub_schema_except1, testpub_schema_except2, testpub_schema_except_multi;
+DROP PUBLICATION testpub_schema_except1, testpub_schema_except2, testpub_schema_except_multi, testpub_alter_except;
 ---------------------------------------------
 -- Tests for publications with SEQUENCES
 ---------------------------------------------
