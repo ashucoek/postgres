@@ -3283,6 +3283,30 @@ my %tests = (
 		like => { %full_runs, section_post_data => 1, },
 	},
 
+	'CREATE PUBLICATION pub11' => {
+		create_order => 50,
+		create_sql =>
+		  'CREATE PUBLICATION pub11 FOR TABLES IN SCHEMA dump_test EXCEPT (TABLE test_table);',
+		regexp => qr/^
+			\QCREATE PUBLICATION pub11 WITH (publish = 'insert, update, delete, truncate');\E
+			.*?
+			\QALTER PUBLICATION pub11 ADD TABLES IN SCHEMA dump_test EXCEPT (TABLE ONLY test_table);\E
+			/xms,
+		like => { %full_runs, section_post_data => 1, },
+	},
+
+	'CREATE PUBLICATION pub12' => {
+		create_order => 50,
+		create_sql =>
+		  'CREATE PUBLICATION pub12 FOR TABLES IN SCHEMA dump_test EXCEPT (TABLE test_table, dump_test.test_second_table);',
+		regexp => qr/^
+			\QCREATE PUBLICATION pub12 WITH (publish = 'insert, update, delete, truncate');\E
+			.*?
+			\QALTER PUBLICATION pub12 ADD TABLES IN SCHEMA dump_test EXCEPT (TABLE ONLY test_table, TABLE ONLY test_second_table);\E
+			/xms,
+		like => { %full_runs, section_post_data => 1, },
+	},
+
 	'CREATE SUBSCRIPTION sub1' => {
 		create_order => 50,
 		create_sql => 'CREATE SUBSCRIPTION sub1

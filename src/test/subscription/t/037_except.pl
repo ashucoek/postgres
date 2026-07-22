@@ -24,14 +24,17 @@ my $result;
 
 sub test_except_root_partition
 {
-	my ($pubviaroot) = @_;
+	my ($pubviaroot, $pubsql) = @_;
+	$pubsql //=
+	  "CREATE PUBLICATION tap_pub_part FOR ALL TABLES EXCEPT (TABLE root1)";
+	$pubsql .= " WITH (publish_via_partition_root = $pubviaroot)";
 
 	# If the root partitioned table is in the EXCEPT clause, all its
 	# partitions are excluded from publication, regardless of the
 	# publish_via_partition_root setting.
 	$node_publisher->safe_psql(
 		'postgres', qq(
-		CREATE PUBLICATION tap_pub_part FOR ALL TABLES EXCEPT (TABLE root1) WITH (publish_via_partition_root = $pubviaroot);
+		$pubsql;
 		INSERT INTO root1 VALUES (1), (101);
 	));
 	$node_subscriber->safe_psql('postgres',
@@ -223,6 +226,218 @@ $node_subscriber->safe_psql(
 test_except_root_partition('false');
 test_except_root_partition('true');
 
+# Same validation using TABLES IN SCHEMA instead of FOR ALL TABLES.
+my $schema_pub =
+  "CREATE PUBLICATION tap_pub_part FOR TABLES IN SCHEMA public EXCEPT (TABLE public.root1)";
+test_except_root_partition('false', $schema_pub);
+test_except_root_partition('true', $schema_pub);
+
+# ============================================
+# EXCEPT test cases for TABLES IN SCHEMA
+# ============================================
+
+# Create a dedicated schema with two tables: one to be published and one to be
+# excluded.  Also create inherited tables to verify ONLY semantics.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE SCHEMA sch1;
+	CREATE TABLE sch1.tab_published AS SELECT generate_series(1,5) AS a;
+	CREATE TABLE sch1.tab_excluded AS SELECT generate_series(1,5) AS a;
+	CREATE TABLE sch1.parent (a int);
+	CREATE TABLE sch1.child (b int) INHERITS (sch1.parent);
+));
+
+$node_subscriber->safe_psql(
+	'postgres', qq(
+	CREATE SCHEMA sch1;
+	CREATE TABLE sch1.tab_published (a int);
+	CREATE TABLE sch1.tab_excluded (a int);
+	CREATE TABLE sch1.parent (a int);
+	CREATE TABLE sch1.child (b int) INHERITS (sch1.parent);
+));
+
+# Basic test: initial sync respects EXCEPT.
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION sch_pub FOR TABLES IN SCHEMA sch1 EXCEPT (TABLE sch1.tab_excluded)"
+);
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sch_sub CONNECTION '$publisher_connstr' PUBLICATION sch_pub"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_published");
+is($result, qq(5),
+	'TABLES IN SCHEMA EXCEPT: initial sync copies included table');
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_excluded");
+is($result, qq(0),
+	'TABLES IN SCHEMA EXCEPT: initial sync skips excluded table');
+
+# DML: only the included table should be replicated.
+$node_publisher->safe_psql(
+	'postgres', qq(
+	INSERT INTO sch1.tab_published VALUES (6);
+	INSERT INTO sch1.tab_excluded VALUES (6);
+));
+$node_publisher->wait_for_catchup('sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_published");
+is($result, qq(6),
+	'TABLES IN SCHEMA EXCEPT: DML on included table is replicated');
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_excluded");
+is($result, qq(0),
+	'TABLES IN SCHEMA EXCEPT: DML on excluded table is not replicated');
+
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sch_sub');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION sch_pub');
+
+# Inherited tables: excluding the parent (without ONLY) also excludes the child.
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION sch_pub FOR TABLES IN SCHEMA sch1 EXCEPT (TABLE sch1.parent)"
+);
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sch_sub CONNECTION '$publisher_connstr' PUBLICATION sch_pub"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO sch1.child VALUES (generate_series(1,5), generate_series(1,5))"
+);
+$node_publisher->wait_for_catchup('sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM sch1.child");
+is($result, qq(0),
+	'TABLES IN SCHEMA EXCEPT: excluding parent (without ONLY) also excludes child'
+);
+
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sch_sub');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION sch_pub');
+
+# Test that EXCEPT (TABLE ONLY parent) excludes only the parent itself, not its
+# child.  Truncate child first so rows from the previous test are not copied by
+# the initial table sync of the next subscription.
+$node_publisher->safe_psql('postgres', 'TRUNCATE sch1.child');
+$node_subscriber->safe_psql('postgres', 'TRUNCATE sch1.child');
+$node_publisher->safe_psql('postgres',
+	"CREATE PUBLICATION sch_pub FOR TABLES IN SCHEMA sch1 EXCEPT (TABLE ONLY sch1.parent)"
+);
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sch_sub CONNECTION '$publisher_connstr' PUBLICATION sch_pub"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$node_publisher->safe_psql('postgres',
+	"INSERT INTO sch1.child VALUES (generate_series(1,5), generate_series(1,5))"
+);
+$node_publisher->wait_for_catchup('sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT count(*) FROM sch1.child");
+is($result, qq(5),
+	'TABLES IN SCHEMA EXCEPT: ONLY parent in EXCEPT does not exclude child');
+
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sch_sub');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION sch_pub');
+
+# ============================================
+# ALTER PUBLICATION EXCEPT for TABLES IN SCHEMA
+# ============================================
+
+# Truncate subscriber tables to remove data accumulated from previous tests.
+$node_subscriber->safe_psql('postgres',
+	'TRUNCATE sch1.tab_published, sch1.tab_excluded, sch1.parent, sch1.child');
+
+# ADD: add a schema with an excepted table; verify the except entry takes effect.
+$node_publisher->safe_psql('postgres', "CREATE PUBLICATION sch_pub");
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION sch_pub ADD TABLES IN SCHEMA sch1 EXCEPT (TABLE sch1.tab_excluded)"
+);
+$node_subscriber->safe_psql('postgres',
+	"CREATE SUBSCRIPTION sch_sub CONNECTION '$publisher_connstr' PUBLICATION sch_pub"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_published");
+is($result, qq(6),
+	'ALTER ... ADD TABLES IN SCHEMA EXCEPT: included table synced');
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_excluded");
+is($result, qq(0),
+	'ALTER ... ADD TABLES IN SCHEMA EXCEPT: excluded table not synced');
+
+# SET: replace the except list; tab_excluded is now included and tab_published is excluded.
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION sch_pub SET TABLES IN SCHEMA sch1 EXCEPT (TABLE sch1.tab_published)"
+);
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION sch_sub REFRESH PUBLICATION");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$node_publisher->safe_psql(
+	'postgres', qq(
+	INSERT INTO sch1.tab_published VALUES (7);
+	INSERT INTO sch1.tab_excluded VALUES (7);
+));
+$node_publisher->wait_for_catchup('sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_excluded WHERE a = 7");
+is($result, qq(1),
+	'ALTER ... SET TABLES IN SCHEMA EXCEPT: newly included table is replicated'
+);
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_published WHERE a = 7");
+is($result, qq(0),
+	'ALTER ... SET TABLES IN SCHEMA EXCEPT: now-excluded table is not replicated'
+);
+
+# SET without EXCEPT: clears the except list; both tables are now published.
+$node_publisher->safe_psql('postgres',
+	"ALTER PUBLICATION sch_pub SET TABLES IN SCHEMA sch1");
+$node_subscriber->safe_psql('postgres',
+	"ALTER SUBSCRIPTION sch_sub REFRESH PUBLICATION");
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'sch_sub');
+
+$node_publisher->safe_psql(
+	'postgres', qq(
+	INSERT INTO sch1.tab_published VALUES (8);
+	INSERT INTO sch1.tab_excluded VALUES (8);
+));
+$node_publisher->wait_for_catchup('sch_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_published WHERE a = 8");
+is($result, qq(1),
+	'ALTER ... SET TABLES IN SCHEMA (no EXCEPT): tab_published replicated after except list cleared'
+);
+$result =
+  $node_subscriber->safe_psql('postgres',
+	"SELECT count(*) FROM sch1.tab_excluded WHERE a = 8");
+is($result, qq(1),
+	'ALTER ... SET TABLES IN SCHEMA (no EXCEPT): tab_excluded replicated after except list cleared'
+);
+
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION sch_sub');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION sch_pub');
+
+# Cleanup schema tables before the multi-publication section.
+$node_publisher->safe_psql('postgres', 'DROP SCHEMA sch1 CASCADE');
+$node_subscriber->safe_psql('postgres', 'DROP SCHEMA sch1 CASCADE');
+
 # ============================================
 # Test when a subscription is subscribing to multiple publications
 # ============================================
@@ -254,6 +469,7 @@ $node_publisher->safe_psql(
 	DROP PUBLICATION tap_pub2;
 	TRUNCATE tab1;
 ));
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION tap_sub');
 $node_subscriber->safe_psql('postgres', qq(TRUNCATE tab1));
 
 # OK when a table is excluded by pub1 EXCEPT clause, but it is included by pub2
@@ -276,6 +492,36 @@ $result =
 is( $result, qq(1
 2),
 	"check replication of a table in the EXCEPT clause of one publication but included by another"
+);
+
+$node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION tap_sub');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION tap_pub1');
+$node_publisher->safe_psql('postgres', 'DROP PUBLICATION tap_pub2');
+
+# OK when a table is excluded by a TABLES IN SCHEMA EXCEPT publication,
+# but is included by another publication.
+$node_publisher->safe_psql('postgres', 'TRUNCATE tab1');
+$node_subscriber->safe_psql('postgres', 'TRUNCATE tab1');
+
+$node_publisher->safe_psql(
+	'postgres', qq(
+	CREATE PUBLICATION tap_pub1 FOR TABLES IN SCHEMA public EXCEPT (TABLE public.tab1);
+	CREATE PUBLICATION tap_pub2 FOR TABLE tab1;
+	INSERT INTO tab1 VALUES(1);
+));
+$node_subscriber->psql('postgres',
+	"CREATE SUBSCRIPTION tap_sub CONNECTION '$publisher_connstr' PUBLICATION tap_pub1, tap_pub2"
+);
+$node_subscriber->wait_for_subscription_sync($node_publisher, 'tap_sub');
+
+$node_publisher->safe_psql('postgres', qq(INSERT INTO tab1 VALUES(2)));
+$node_publisher->wait_for_catchup('tap_sub');
+
+$result =
+  $node_subscriber->safe_psql('postgres', "SELECT * FROM tab1 ORDER BY a");
+is( $result, qq(1
+2),
+	"TABLES IN SCHEMA EXCEPT: table excluded in schema pub but included by another pub is replicated"
 );
 
 $node_subscriber->safe_psql('postgres', 'DROP SUBSCRIPTION tap_sub');

@@ -28,7 +28,7 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
 <phrase>where <replaceable class="parameter">publication_object</replaceable> is one of:</phrase>
 
     TABLE <replaceable class="parameter">table_and_columns</replaceable> [, ... ]
-    TABLES IN SCHEMA { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [, ... ]
+    TABLES IN SCHEMA <replaceable class="parameter">tables_in_schema</replaceable> [, ... ]
 
 <phrase>and <replaceable class="parameter">publication_all_object</replaceable> is one of:</phrase>
 
@@ -38,6 +38,10 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
 <phrase>and <replaceable class="parameter">table_and_columns</replaceable> is:</phrase>
 
     <replaceable class="parameter">table_object</replaceable> [ ( <replaceable class="parameter">column_name</replaceable> [, ... ] ) ] [ WHERE ( <replaceable class="parameter">expression</replaceable> ) ]
+
+<phrase>and <replaceable class="parameter">tables_in_schema</replaceable> is:</phrase>
+
+    { <replaceable class="parameter">schema_name</replaceable> | CURRENT_SCHEMA } [ EXCEPT ( <replaceable class="parameter">except_table_object</replaceable> [, ... ] ) ]
 
 <phrase>and <replaceable class="parameter">except_table_object</replaceable> is:</phrase>
 
@@ -142,6 +146,8 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
      <para>
       Marks the publication as one that replicates changes for all tables in
       the specified list of schemas, including tables created in the future.
+      Tables listed in the <literal>EXCEPT</literal> clause for a given schema
+      are excluded from the publication.
      </para>
 
      <para>
@@ -173,7 +179,7 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
      <para>
       Marks the publication as one that replicates changes for all tables in
       the database, including tables created in the future. Tables listed in
-      <literal>EXCEPT</literal> clause are excluded from the publication.
+      the <literal>EXCEPT</literal> clause are excluded from the publication.
      </para>
     </listitem>
    </varlistentry>
@@ -198,13 +204,21 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
     <listitem>
      <para>
       This clause specifies a list of tables to be excluded from the
-      publication.
+      publication. It can be used with <literal>FOR ALL TABLES</literal> or
+      <literal>FOR TABLES IN SCHEMA</literal>. For <literal>FOR TABLES IN
+      SCHEMA</literal>, the exclusion applies only to tables in the schema
+      associated with the <literal>EXCEPT</literal>.
      </para>
      <para>
-      Once a table is excluded, the exclusion applies to that table
-      regardless of its name or schema. Renaming the table or moving it to
-      another schema using <command>ALTER TABLE ... SET SCHEMA</command> does
-      not remove the exclusion.
+      Once a table is excluded under <literal>FOR ALL TABLES</literal>, the
+      exclusion applies to that table regardless of its name or schema.
+      Renaming the table or moving it to another schema using
+      <command>ALTER TABLE ... SET SCHEMA</command> does not remove the
+      exclusion. However, for <literal>FOR TABLES IN SCHEMA</literal>, because
+      the <literal>EXCEPT</literal> is schema-scoped, moving a schema-excluded
+      table to another schema does remove the exclusion; if the table is later
+      moved back, the exclusion is not restored and must be re-established
+      with <command>ALTER PUBLICATION</command>.
      </para>
      <para>
       For inherited tables, if <literal>ONLY</literal> is specified before the
@@ -217,7 +231,8 @@ CREATE PUBLICATION <replaceable class="parameter">name</replaceable>
      <para>
       For partitioned tables, only the root partitioned table may be specified
       in <literal>EXCEPT</literal>. Doing so excludes the root table and
-      all of its partitions from replication. The optional
+      all of its partitions from replication, even any partition that lives
+      in a schema which is itself included in the publication. The optional
       <literal>ONLY</literal> and <literal>*</literal> has no effect for
       partitioned tables.
      </para>
@@ -520,6 +535,15 @@ CREATE PUBLICATION production_publication FOR TABLE users, departments, TABLES I
 <programlisting>
 CREATE PUBLICATION sales_publication FOR TABLES IN SCHEMA marketing, sales;
 </programlisting></para>
+
+  <para>
+   Create a publication that publishes all changes for all the tables present in
+   the schema <structname>sales</structname>, except
+   <structname>internal</structname> and <structname>drafts</structname>:
+<programlisting>
+CREATE PUBLICATION sales_filtered FOR TABLES IN SCHEMA sales EXCEPT (TABLE internal, drafts);
+</programlisting>
+  </para>
 
   <para>
    Create a publication that publishes all changes for table <structname>users</structname>,

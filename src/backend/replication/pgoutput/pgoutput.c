@@ -2097,12 +2097,35 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 		 * are absorbed while decoding WAL.
 		 */
 		List	   *schemaPubids = GetSchemaPublications(schemaId);
+		List	   *except_pubids;
 		ListCell   *lc;
 		Oid			publish_as_relid = relid;
 		int			publish_ancestor_level = 0;
 		bool		am_partition = get_rel_relispartition(relid);
 		char		relkind = get_rel_relkind(relid);
 		List	   *rel_publications = NIL;
+
+		/*
+		 * For the schema EXCEPT check, we must look up the top-most ancestor
+		 * rather than the relation itself.  check_publication_add_relation()
+		 * prevents individual partitions from appearing in the EXCEPT clause,
+		 * so only a root (non-partition) table can have prexcept = true.
+		 * Using the partition's own OID would always return NIL and miss the
+		 * exclusion.
+		 */
+		Oid			root_relid;
+
+		if (am_partition)
+		{
+			List	   *ancestors = get_partition_ancestors(relid);
+
+			root_relid = llast_oid(ancestors);
+			list_free(ancestors);
+		}
+		else
+			root_relid = relid;
+
+		except_pubids = GetRelationExcludedPublications(root_relid);
 
 		/* Reload publications if needed before use. */
 		if (!publications_valid)
@@ -2265,9 +2288,19 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 					int			level;
 					List	   *ancestors = get_partition_ancestors(relid);
 
+					/*
+					 * Reach here for FOR TABLE, FOR TABLES IN SCHEMA, or
+					 * mixed publications. except_pubids lets
+					 * GetTopMostAncestorInPublication() skip schema-based
+					 * ancestor matches when the partition root is excluded
+					 * via this publication's EXCEPT clause. It has no effect
+					 * for pure FOR TABLE publications, which cannot have
+					 * prexcept rows.
+					 */
 					ancestor = GetTopMostAncestorInPublication(pub->oid,
 															   ancestors,
-															   &level);
+															   &level,
+															   except_pubids);
 
 					if (ancestor != InvalidOid)
 					{
@@ -2281,7 +2314,8 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 				}
 
 				if (list_member_oid(pubids, pub->oid) ||
-					list_member_oid(schemaPubids, pub->oid) ||
+					(list_member_oid(schemaPubids, pub->oid) &&
+					 !list_member_oid(except_pubids, pub->oid)) ||
 					ancestor_published)
 					publish = true;
 			}
@@ -2360,6 +2394,7 @@ get_rel_sync_entry(PGOutputData *data, Relation relation)
 
 		list_free(pubids);
 		list_free(schemaPubids);
+		list_free(except_pubids);
 		list_free(rel_publications);
 
 		entry->replicate_valid = true;

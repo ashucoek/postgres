@@ -4973,6 +4973,7 @@ dumpPublicationNamespace(Archive *fout, const PublicationSchemaInfo *pubsinfo)
 	PublicationInfo *pubinfo = pubsinfo->publication;
 	PQExpBuffer query;
 	char	   *tag;
+	bool		has_except = false;
 
 	/* Do nothing if not dumping schema */
 	if (!dopt->dumpSchema)
@@ -4983,7 +4984,34 @@ dumpPublicationNamespace(Archive *fout, const PublicationSchemaInfo *pubsinfo)
 	query = createPQExpBuffer();
 
 	appendPQExpBuffer(query, "ALTER PUBLICATION %s ", fmtId(pubinfo->dobj.name));
-	appendPQExpBuffer(query, "ADD TABLES IN SCHEMA %s;\n", fmtId(schemainfo->dobj.name));
+	appendPQExpBuffer(query, "ADD TABLES IN SCHEMA %s", fmtId(schemainfo->dobj.name));
+
+	/*
+	 * Append EXCEPT clause for any tables that belong to this schema
+	 * and are excluded from the publication.
+	 */
+	for (SimplePtrListCell *cell = pubinfo->except_tables.head; cell; cell = cell->next)
+	{
+		TableInfo  *tbinfo = (TableInfo *) cell->ptr;
+
+		if (strcmp(tbinfo->dobj.namespace->dobj.name, schemainfo->dobj.name) == 0)
+		{
+			if (!has_except)
+			{
+				appendPQExpBufferStr(query, " EXCEPT (");
+				has_except = true;
+			}
+			else
+				appendPQExpBufferStr(query, ", ");
+
+			appendPQExpBuffer(query, "TABLE ONLY %s", fmtId(tbinfo->dobj.name));
+		}
+	}
+
+	if (has_except)
+		appendPQExpBufferStr(query, ")");
+
+	appendPQExpBufferStr(query, ";\n");
 
 	/*
 	 * There is no point in creating drop query as the drop is done by schema
