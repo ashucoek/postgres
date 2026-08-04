@@ -40,6 +40,7 @@
 #include <sys/stat.h>
 
 #include "access/transam.h"
+#include "access/xact.h"
 #include "access/xlog_internal.h"
 #include "access/xlogrecovery.h"
 #include "common/file_utils.h"
@@ -59,6 +60,7 @@
 #include "utils/builtins.h"
 #include "utils/guc_hooks.h"
 #include "utils/injection_point.h"
+#include "utils/snapmgr.h"
 #include "utils/varlena.h"
 #include "utils/wait_event.h"
 
@@ -156,6 +158,13 @@ const ShmemCallbacks ReplicationSlotsShmemCallbacks = {
 
 /* My backend's replication slot in the shared memory array */
 ReplicationSlot *MyReplicationSlot = NULL;
+
+/*
+ * Subtransaction that acquired MyReplicationSlot, or invalid if none is held
+ * or it was acquired with no transaction in progress (as a walsender does).
+ * Used to release the slot when that subxact aborts.
+ */
+static SubTransactionId acquiredInSubId = InvalidSubTransactionId;
 
 /* GUC variables */
 int			max_replication_slots = 10; /* the maximum number of replication
@@ -519,6 +528,7 @@ ReplicationSlotCreate(const char *name, bool db_specific,
 	slot->active_proc = MyProcNumber;
 	SpinLockRelease(&slot->mutex);
 	MyReplicationSlot = slot;
+	acquiredInSubId = GetCurrentSubTransactionId();
 
 	LWLockRelease(ReplicationSlotControlLock);
 
@@ -724,6 +734,7 @@ retry:
 
 	/* We made this slot active, so it's ours now. */
 	MyReplicationSlot = s;
+	acquiredInSubId = GetCurrentSubTransactionId();
 
 	/*
 	 * We need to check for invalidation after making the slot ours to avoid
@@ -848,6 +859,80 @@ ReplicationSlotRelease(void)
 
 		pfree(slotname);
 	}
+
+	/* The slot is no longer acquired in any subxact. */
+	acquiredInSubId = InvalidSubTransactionId;
+}
+
+/*
+ * Release the replication slot at subxact end if it was acquired here.
+ *
+ * A slot function acquires a slot and releases it before returning. On error
+ * the top-level error handler releases it. But an exception block (in PL/pgSQL,
+ * PL/Perl, PL/Python or PL/Tcl) catches the error in an internal subxact
+ * without re-throwing, so the top-level handler is not reached and the slot
+ * stays acquired. Release it when the subxact that acquired it aborts, the same
+ * way AtEOSubXact_LargeObject() and other subxact-scoped resources are handled.
+ * The subxact id is used rather than a nesting level because levels are reused
+ * across subxacts while ids are not.
+ */
+void
+AtEOSubXact_ReplicationSlot(bool isCommit, SubTransactionId mySubid,
+							SubTransactionId parentSubid)
+{
+	/* Nothing to do unless the slot was acquired in this subxact. */
+	if (acquiredInSubId != mySubid)
+		return;
+
+	/*
+	 * On commit, hand the slot to the parent subxact. A slot held across a
+	 * subxact commit (acquired but not yet released by its caller) would
+	 * otherwise be attributed to a gone subxact, and we still want it
+	 * released if the parent, or an ancestor, later aborts.
+	 */
+	if (isCommit)
+	{
+		acquiredInSubId = parentSubid;
+		return;
+	}
+
+	/*
+	 * We must not get here while decoding is running. Decoding starts and
+	 * aborts an internal (sub)transaction while holding the slot, for each
+	 * decoded transaction (ReorderBufferProcessTXN()) and when executing
+	 * invalidations (ReorderBufferImmediateInvalidation()), but that always
+	 * happens below the acquiring subxact, so those aborts have a different
+	 * (deeper) id and do not match here. Decoding also runs with a historic
+	 * snapshot set up, so assert that it is not.
+	 */
+	Assert(!HistoricSnapshotActive());
+
+	if (MyReplicationSlot != NULL)
+		ReplicationSlotRelease();
+
+	/*
+	 * Also drop this session's temporary slots, as the top-level error
+	 * handler does. Otherwise a temporary slot could be left behind holding
+	 * back WAL removal and the catalog xmin after an error, including an
+	 * error in slot handling itself.
+	 *
+	 * XXX This only runs when the aborting subxact held a slot. A caught
+	 * error that held no slot (for example an unrelated error in a PL/pgSQL
+	 * EXCEPTION block) does not drop the session's temporary slots, unlike a
+	 * top-level error, which always does. To also cover that, the cleanup
+	 * would have to run at the early exit above, on every aborting subxact.
+	 * But a slot must be released before it can be cleaned up
+	 * (ReplicationSlotCleanup() requires no slot to be held), so that path
+	 * would need its own MyReplicationSlot == NULL guard to skip the case
+	 * where decoding still holds a slot. That is harder to reason about, so
+	 * the cleanup is kept here after the release.
+	 *
+	 * XXX Alternatively we could keep the temporary slots and treat the error
+	 * as recoverable, since the subxact was caught and the session goes on.
+	 * But the error may be in the slot handling itself, leaving the slot in a
+	 * doubtful state, so dropping it is the safer choice.
+	 */
+	ReplicationSlotCleanup(false);
 }
 
 /*
@@ -1042,6 +1127,7 @@ ReplicationSlotDropAcquired(bool try_disable)
 
 	/* slot isn't acquired anymore */
 	MyReplicationSlot = NULL;
+	acquiredInSubId = InvalidSubTransactionId;
 
 	ReplicationSlotDropPtr(slot);
 
