@@ -121,6 +121,9 @@ extern PGDLLIMPORT int MyXactFlags;
  */
 #define XACT_FLAGS_PIPELINING					(1U << 3)
 
+/* XACT_FLAGS_HAS_RELATION_CREATE - relation creation manifests were written. */
+#define XACT_FLAGS_HAS_RELATION_CREATE		(1U << 4)
+
 /*
  *	start- and end-of-transaction callbacks for dynamically loaded modules
  */
@@ -195,6 +198,7 @@ typedef struct SavedTransactionCharacteristics
 #define XACT_XINFO_HAS_AE_LOCKS			(1U << 6)
 #define XACT_XINFO_HAS_GID				(1U << 7)
 #define XACT_XINFO_HAS_DROPPED_STATS	(1U << 8)
+#define XACT_XINFO_HAS_RELATION_CREATE	(1U << 9)
 
 /*
  * Also stored in xinfo, these indicating a variety of additional actions that

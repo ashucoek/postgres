@@ -27,6 +27,7 @@
 #include <sys/file.h>
 
 #include "access/xlogutils.h"
+#include "catalog/storage.h"
 #include "commands/tablespace.h"
 #include "common/file_utils.h"
 #include "miscadmin.h"
@@ -1957,6 +1958,8 @@ int
 mdunlinkfiletag(const FileTag *ftag, char *path)
 {
 	RelPathStr	p;
+	int			result;
+	int			save_errno;
 
 	/* We only unlink tombstone files through this mechanism */
 	Assert(ftag->forknum == MAIN_FORKNUM && ftag->segno == 0);
@@ -1966,7 +1969,11 @@ mdunlinkfiletag(const FileTag *ftag, char *path)
 	strlcpy(path, p.str, MAXPGPATH);
 
 	/* Try to unlink the file. */
-	return unlink(path);
+	result = unlink(path);
+	save_errno = errno;
+
+	errno = save_errno;
+	return result;
 }
 
 /*

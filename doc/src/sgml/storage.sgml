@@ -107,6 +107,12 @@ Item
 </row>
 
 <row>
+ <entry><filename>pg_relcreate</filename></entry>
+ <entry>Subdirectory containing durable manifests for transactional relation
+ creation</entry>
+</row>
+
+<row>
  <entry><filename>pg_serial</filename></entry>
  <entry>Subdirectory containing information about committed serializable transactions</entry>
 </row>

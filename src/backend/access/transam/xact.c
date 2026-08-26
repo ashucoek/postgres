@@ -5913,6 +5913,8 @@ XactLogCommitRecord(TimestampTz commit_time,
 		xl_xinfo.xinfo |= XACT_COMPLETION_FORCE_SYNC_COMMIT;
 	if ((xactflags & XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK))
 		xl_xinfo.xinfo |= XACT_XINFO_HAS_AE_LOCKS;
+	if ((xactflags & XACT_FLAGS_HAS_RELATION_CREATE))
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_RELATION_CREATE;
 
 	/*
 	 * Check if the caller would like to ask standbys for immediate feedback
@@ -6080,6 +6082,8 @@ XactLogAbortRecord(TimestampTz abort_time,
 
 	if ((xactflags & XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK))
 		xl_xinfo.xinfo |= XACT_XINFO_HAS_AE_LOCKS;
+	if ((xactflags & XACT_FLAGS_HAS_RELATION_CREATE))
+		xl_xinfo.xinfo |= XACT_XINFO_HAS_RELATION_CREATE;
 
 	if (nsubxacts > 0)
 	{
@@ -6331,6 +6335,10 @@ xact_redo_commit(xl_xact_parsed_commit *parsed,
 	 */
 	if (XactCompletionApplyFeedback(parsed->xinfo))
 		XLogRequestWalReceiverReply();
+
+	if (parsed->xinfo & XACT_XINFO_HAS_RELATION_CREATE)
+		RelationCreateManifestCleanupTree(xid, parsed->nsubxacts,
+									  parsed->subxacts);
 }
 
 /*
@@ -6419,6 +6427,10 @@ xact_redo_abort(xl_xact_parsed_abort *parsed, TransactionId xid,
 
 		pgstat_execute_transactional_drops(parsed->nstats, parsed->stats, true);
 	}
+
+	if (parsed->xinfo & XACT_XINFO_HAS_RELATION_CREATE)
+		RelationCreateManifestCleanupTree(xid, parsed->nsubxacts,
+									  parsed->subxacts);
 }
 
 void

@@ -432,6 +432,22 @@ extractPageInfo(XLogReaderState *record)
 		 * for all the blocks in it.
 		 */
 	}
+	else if (rmid == RM_SMGR_ID && rminfo == XLOG_SMGR_PRECREATE)
+	{
+		/*
+		 * We can safely ignore these. The manifest file will be copied or
+		 * removed when the target data directory is synchronized with the
+		 * source.
+		 */
+	}
+	else if (rmid == RM_SMGR_ID && rminfo == XLOG_SMGR_PRESERVE)
+	{
+		/*
+		 * We can safely ignore these. The manifest file will be copied or
+		 * removed when the target data directory is synchronized with the
+		 * source.
+		 */
+	}
 	else if (rmid == RM_SMGR_ID && rminfo == XLOG_SMGR_TRUNCATE)
 	{
 		/*

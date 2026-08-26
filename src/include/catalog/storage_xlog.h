@@ -29,6 +29,19 @@
 /* XLOG gives us high 4 bits */
 #define XLOG_SMGR_CREATE	0x10
 #define XLOG_SMGR_TRUNCATE	0x20
+#define XLOG_SMGR_PRECREATE	0x30
+#define XLOG_SMGR_PRESERVE	0x40
+
+typedef struct xl_smgr_precreate
+{
+	RelFileLocator rlocator;
+} xl_smgr_precreate;
+
+typedef struct xl_smgr_preserve
+{
+	RelFileLocator rlocator;
+	TransactionId xid;
+} xl_smgr_preserve;
 
 typedef struct xl_smgr_create
 {
@@ -51,6 +64,8 @@ typedef struct xl_smgr_truncate
 } xl_smgr_truncate;
 
 extern void log_smgrcreate(const RelFileLocator *rlocator, ForkNumber forkNum);
+extern TransactionId log_smgrprecreate(const RelFileLocator *rlocator);
+extern void log_smgrpreserve(const RelFileLocator *rlocator, TransactionId xid);
 
 extern void smgr_redo(XLogReaderState *record);
 extern void smgr_desc(StringInfo buf, XLogReaderState *record);

@@ -67,6 +67,7 @@
 #include "catalog/catversion.h"
 #include "catalog/pg_control.h"
 #include "catalog/pg_database.h"
+#include "catalog/storage.h"
 #include "common/controldata_utils.h"
 #include "common/file_utils.h"
 #include "executor/instrument.h"
@@ -6948,6 +6949,9 @@ StartupXLOG(void)
 	if (standbyState != STANDBY_DISABLED)
 		ShutdownRecoveryTransactionEnvironment();
 
+	if (performedWalRecovery)
+		RelationCreateManifestCleanupAtEndOfRecovery();
+
 	/*
 	 * If there were cascading standby servers connected to us, nudge any wal
 	 * sender processes to notice that we've been promoted.
@@ -8403,6 +8407,8 @@ CheckPointGuts(XLogRecPtr checkPointRedo, int flags)
 	TRACE_POSTGRESQL_BUFFER_CHECKPOINT_SYNC_START();
 	CheckpointStats.ckpt_sync_t = GetCurrentTimestamp();
 	ProcessSyncRequests();
+	if (!RecoveryInProgress())
+		RelationCreateManifestCleanupAtCheckpoint();
 	CheckpointStats.ckpt_sync_end_t = GetCurrentTimestamp();
 	TRACE_POSTGRESQL_BUFFER_CHECKPOINT_DONE();
 

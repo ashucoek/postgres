@@ -23,7 +23,22 @@ smgr_desc(StringInfo buf, XLogReaderState *record)
 	char	   *rec = XLogRecGetData(record);
 	uint8		info = XLogRecGetInfo(record) & ~XLR_INFO_MASK;
 
-	if (info == XLOG_SMGR_CREATE)
+	if (info == XLOG_SMGR_PRECREATE)
+	{
+		xl_smgr_precreate *xlrec = (xl_smgr_precreate *) rec;
+
+		appendStringInfoString(buf,
+							   relpathperm(xlrec->rlocator, MAIN_FORKNUM).str);
+	}
+	else if (info == XLOG_SMGR_PRESERVE)
+	{
+		xl_smgr_preserve *xlrec = (xl_smgr_preserve *) rec;
+
+		appendStringInfo(buf, "%s xid %u",
+						 relpathperm(xlrec->rlocator, MAIN_FORKNUM).str,
+						 xlrec->xid);
+	}
+	else if (info == XLOG_SMGR_CREATE)
 	{
 		xl_smgr_create *xlrec = (xl_smgr_create *) rec;
 
@@ -47,6 +62,12 @@ smgr_identify(uint8 info)
 
 	switch (info & ~XLR_INFO_MASK)
 	{
+		case XLOG_SMGR_PRECREATE:
+			id = "PRECREATE";
+			break;
+		case XLOG_SMGR_PRESERVE:
+			id = "PRESERVE";
+			break;
 		case XLOG_SMGR_CREATE:
 			id = "CREATE";
 			break;

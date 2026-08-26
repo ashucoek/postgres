@@ -48,6 +48,7 @@ extern GlobalTransaction MarkAsPreparing(FullTransactionId fxid, const char *gid
 extern void StartPrepare(GlobalTransaction gxact);
 extern void EndPrepare(GlobalTransaction gxact);
 extern bool StandbyTransactionIdIsPrepared(TransactionId xid);
+extern bool TwoPhaseTransactionIdIsPrepared(TransactionId xid);
 
 extern TransactionId PrescanPreparedTransactions(TransactionId **xids_p,
 												 int *nxids_p);

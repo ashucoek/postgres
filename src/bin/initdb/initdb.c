@@ -236,6 +236,7 @@ static const char *const subdirs[] = {
 	"pg_commit_ts",
 	"pg_dynshmem",
 	"pg_notify",
+	"pg_relcreate",
 	"pg_serial",
 	"pg_snapshots",
 	"pg_subtrans",

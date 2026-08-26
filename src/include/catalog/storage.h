@@ -27,6 +27,12 @@ extern SMgrRelation RelationCreateStorage(RelFileLocator rlocator,
 										  bool register_delete);
 extern void RelationDropStorage(Relation rel);
 extern void RelationPreserveStorage(RelFileLocator rlocator, bool atCommit);
+extern void RelationCreateManifestCleanup(TransactionId xid);
+extern void RelationCreateManifestCleanupTree(TransactionId xid,
+									  int nsubxacts,
+									  TransactionId *subxacts);
+extern void RelationCreateManifestCleanupAtCheckpoint(void);
+extern void RelationCreateManifestCleanupAtEndOfRecovery(void);
 extern void RelationPreTruncate(Relation rel);
 extern void RelationTruncate(Relation rel, BlockNumber nblocks);
 extern void RelationCopyStorage(SMgrRelation src, SMgrRelation dst,

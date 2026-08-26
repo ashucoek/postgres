@@ -219,6 +219,7 @@ static void RecordTransactionCommitPrepared(TransactionId xid,
 											int ninvalmsgs,
 											SharedInvalidationMessage *invalmsgs,
 											bool initfileinval,
+											bool hasrelationcreate,
 											const char *gid);
 static void RecordTransactionAbortPrepared(TransactionId xid,
 										   int nchildren,
@@ -1498,6 +1499,32 @@ StandbyTransactionIdIsPrepared(TransactionId xid)
 	return result;
 }
 
+bool
+TwoPhaseTransactionIdIsPrepared(TransactionId xid)
+{
+	TransactionId topxid;
+	bool		result = false;
+
+	Assert(TransactionIdIsValid(xid));
+	topxid = SubTransGetTopmostTransaction(xid);
+
+	LWLockAcquire(TwoPhaseStateLock, LW_SHARED);
+	for (int i = 0; i < TwoPhaseState->numPrepXacts; i++)
+	{
+		GlobalTransaction gxact = TwoPhaseState->prepXacts[i];
+
+		if (gxact->valid &&
+			TransactionIdEquals(XidFromFullTransactionId(gxact->fxid), topxid))
+		{
+			result = true;
+			break;
+		}
+	}
+	LWLockRelease(TwoPhaseStateLock);
+
+	return result;
+}
+
 /*
  * FinishPreparedTransaction: execute COMMIT PREPARED or ROLLBACK PREPARED
  */
@@ -1583,7 +1610,8 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 										hdr->ncommitstats,
 										commitstats,
 										hdr->ninvalmsgs, invalmsgs,
-										hdr->initfileinval, gid);
+										hdr->initfileinval,
+										hdr->nabortrels > 0, gid);
 	else
 		RecordTransactionAbortPrepared(xid,
 									   hdr->nsubxacts, children,
@@ -1624,6 +1652,9 @@ FinishPreparedTransaction(const char *gid, bool isCommit)
 
 	/* Make sure files supposed to be dropped are dropped */
 	DropRelationFiles(delrels, ndelrels, false);
+
+	if (hdr->nabortrels > 0)
+		RelationCreateManifestCleanupTree(xid, hdr->nsubxacts, children);
 
 	if (isCommit)
 		pgstat_execute_transactional_drops(hdr->ncommitstats, commitstats, false);
@@ -2328,6 +2359,7 @@ RecordTransactionCommitPrepared(TransactionId xid,
 								int ninvalmsgs,
 								SharedInvalidationMessage *invalmsgs,
 								bool initfileinval,
+								bool hasrelationcreate,
 								const char *gid)
 {
 	XLogRecPtr	recptr;
@@ -2378,7 +2410,8 @@ RecordTransactionCommitPrepared(TransactionId xid,
 								 nstats, stats,
 								 ninvalmsgs, invalmsgs,
 								 initfileinval,
-								 MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
+								 MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK |
+								 (hasrelationcreate ? XACT_FLAGS_HAS_RELATION_CREATE : 0),
 								 xid, gid);
 
 
@@ -2475,7 +2508,8 @@ RecordTransactionAbortPrepared(TransactionId xid,
 								nchildren, children,
 								nrels, rels,
 								nstats, stats,
-								MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK,
+								MyXactFlags | XACT_FLAGS_ACQUIREDACCESSEXCLUSIVELOCK |
+								(nrels > 0 ? XACT_FLAGS_HAS_RELATION_CREATE : 0),
 								xid, gid);
 
 	if (replorigin)
