@@ -1209,7 +1209,9 @@ ReplicationSlotPersistInvalidation(ReplicationSlotInvalidationCause cause,
 	ReplicationSlot *slot = MyReplicationSlot;
 
 	Assert(slot != NULL);
-	Assert(slot->data.persistency == RS_PERSISTENT);
+	Assert(slot->data.persistency == RS_PERSISTENT ||
+		   (slot->data.persistency == RS_TEMPORARY &&
+			update_inactive_since));
 	Assert(slot->data.invalidated == RS_INVAL_NONE);
 	Assert(cause != RS_INVAL_NONE);
 	Assert(!clear_restart_lsn || cause == RS_INVAL_WAL_REMOVED);
