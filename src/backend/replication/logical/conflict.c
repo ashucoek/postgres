@@ -30,6 +30,7 @@
 #include "storage/lmgr.h"
 #include "utils/array.h"
 #include "utils/builtins.h"
+#include "utils/json.h"
 #include "utils/lsyscache.h"
 #include "utils/pg_lsn.h"
 
@@ -85,10 +86,26 @@ static const ConflictLogColumnDef ConflictLogSchema[] = {
 	{.attname = "remote_origin", .atttypid = TEXTOID},
 	{.attname = "replica_identity_full", .atttypid = BOOLOID},
 	{.attname = "replica_identity", .atttypid = JSONOID},
-	{.attname = "local_conflicts", .atttypid = JSONARRAYOID}
+	{.attname = "local_conflicts", .atttypid = JSONARRAYOID},
+	{.attname = "has_omitted_values", .atttypid = BOOLOID}
 };
 
 #define NUM_CONFLICT_ATTRS ((AttrNumber) lengthof(ConflictLogSchema))
+
+/*
+ * Largest replica identity value recorded verbatim; anything larger is replaced
+ * by a marker recording its length.  See build_index_key_json().
+ *
+ * The cap has to hold against the widest ratio of JSON output to storage a type
+ * can produce.  That is a container holding numerics: numeric output is bounded
+ * near 131kB by NUMERIC_WEIGHT_MAX and NUMERIC_DSCALE_MAX, and the cheapest way
+ * to store one is about 12 bytes inside an array, so the ratio is around 11000.
+ * With at most INDEX_MAX_KEYS key columns the worst case is therefore
+ * 1kB * 11000 * 32 ~= 360MB, comfortably inside the 1GB limit on a json value;
+ * a 2kB cap would not be.  Ordinary keys are orders of magnitude below the cap,
+ * so in practice nothing is ever omitted.
+ */
+#define CONFLICT_MAX_VALUE_SIZE 1024
 
 /*
  * Schema for the elements within the 'local_conflicts' JSON array.
@@ -136,10 +153,11 @@ static void build_index_datums_from_slot(EState *estate, Relation localrel,
 										 bool *isnull);
 static char *build_index_value_desc(EState *estate, Relation localrel,
 									TupleTableSlot *slot, Oid indexoid);
-static Datum tuple_table_slot_to_indextup_json(EState *estate,
-											   Relation localrel,
-											   Oid replica_index,
-											   TupleTableSlot *slot);
+static Datum build_index_key_json(EState *estate,
+								  Relation localrel,
+								  Oid replica_index,
+								  TupleTableSlot *slot,
+								  bool *omitted);
 static TupleDesc build_local_conflicts_tupledesc(void);
 static Datum build_local_conflicts_json_array(List *conflicttuples);
 static void insert_conflict_log_tuple(EState *estate, Relation rel,
@@ -1012,7 +1030,7 @@ build_index_value_desc(EState *estate, Relation localrel, TupleTableSlot *slot,
 }
 
 /*
- * tuple_table_slot_to_indextup_json
+ * build_index_key_json
  *
  * Fetch replica identity key from the tuple table slot and convert into a
  * JSON datum.
@@ -1021,14 +1039,16 @@ build_index_value_desc(EState *estate, Relation localrel, TupleTableSlot *slot,
  * that we can safely fetch and construct the replica identity key values.
  */
 static Datum
-tuple_table_slot_to_indextup_json(EState *estate, Relation localrel,
-								  Oid indexid, TupleTableSlot *slot)
+build_index_key_json(EState *estate, Relation localrel,
+					 Oid indexid, TupleTableSlot *slot,
+					 bool *omitted)
 {
 	Relation	indexDesc;
+	TupleDesc	indexTupDesc;
 	Datum		values[INDEX_MAX_KEYS];
 	bool		isnull[INDEX_MAX_KEYS];
-	HeapTuple	tuple;
-	TupleDesc	tupdesc;
+	StringInfoData result;
+	int			indnkeyatts;
 	Datum		datum;
 
 	Assert(slot != NULL);
@@ -1036,24 +1056,88 @@ tuple_table_slot_to_indextup_json(EState *estate, Relation localrel,
 	Assert(CheckRelationOidLockedByMe(indexid, RowExclusiveLock, true));
 
 	indexDesc = index_open(indexid, NoLock);
+	indexTupDesc = RelationGetDescr(indexDesc);
 
 	build_index_datums_from_slot(estate, localrel, slot, indexDesc, values,
 								 isnull);
-	tupdesc = CreateTupleDescCopy(RelationGetDescr(indexDesc));
 
-	/* Bless the tupdesc so it can be looked up by row_to_json. */
-	BlessTupleDesc(tupdesc);
+	/*
+	 * Build the JSON object here rather than handing the values to
+	 * row_to_json(), and render each of them with its type's output function.
+	 *
+	 * row_to_json() would go through json_categorize_type(), which honours a
+	 * user CREATE CAST (t AS json) for any type at or above
+	 * FirstNormalObjectId.  That cast is a function no other part of apply
+	 * ever calls -- the publisher sends the value using the type's output
+	 * function, the index compares it with the opclass, and neither asks for
+	 * a json representation -- so its result is unrelated to the size of the
+	 * value we received, and a tiny key could render a json value above the
+	 * 1GB limit and error out the apply worker.  Using the output function
+	 * keeps us to the same representation the publisher already produced, as
+	 * the server log does in BuildIndexValueDescription().
+	 *
+	 * Only the key attributes are recorded.  FormIndexDatum() above also
+	 * fills in any non-key (INCLUDE) columns, but those are not part of the
+	 * replica identity.
+	 */
+	indnkeyatts = IndexRelationGetNumberOfKeyAttributes(indexDesc);
 
-	/* Form the replica identity tuple. */
-	tuple = heap_form_tuple(tupdesc, values, isnull);
-	datum = heap_copy_tuple_as_datum(tuple, tupdesc);
+	initStringInfo(&result);
+	appendStringInfoChar(&result, '{');
 
-	heap_freetuple(tuple);
+	for (int i = 0; i < indnkeyatts; i++)
+	{
+		Form_pg_attribute att = TupleDescAttr(indexTupDesc, i);
+
+		if (i > 0)
+			appendStringInfoChar(&result, ',');
+
+		escape_json(&result, NameStr(att->attname));
+		appendStringInfoChar(&result, ':');
+
+		if (isnull[i])
+			appendStringInfoString(&result, "null");
+		else
+		{
+			Oid			outfuncoid;
+			bool		typisvarlena;
+			char	   *outputstr;
+			Size		outputlen;
+
+			/*
+			 * See BuildIndexValueDescription() for why we used rd_opcintype
+			 * instead index's tupleDesc.
+			 */
+			getTypeOutputInfo(indexDesc->rd_opcintype[i], &outfuncoid, &typisvarlena);
+			outputstr = OidOutputFunctionCall(outfuncoid, values[i]);
+			outputlen = strlen(outputstr);
+
+			/*
+			 * Don't record a value larger than CONFLICT_MAX_VALUE_SIZE; put a
+			 * marker recording its length in its place.
+			 */
+			if (outputlen > CONFLICT_MAX_VALUE_SIZE)
+			{
+				/* A marker is an object, so it is appended unescaped. */
+				appendStringInfo(&result,
+								 "{\"omitted\":true,\"length\":" UINT64_FORMAT "}",
+								 (uint64) outputlen);
+				*omitted = true;
+				pfree(outputstr);
+				continue;
+			}
+
+			escape_json(&result, outputstr);
+			pfree(outputstr);
+		}
+	}
+
+	appendStringInfoChar(&result, '}');
+
 	index_close(indexDesc, NoLock);
 
-	/* Convert to a JSON datum. */
-	datum = DirectFunctionCall1(row_to_json, datum);
-	FreeTupleDesc(tupdesc);
+	datum = PointerGetDatum(cstring_to_text_with_len(result.data, result.len));
+	pfree(result.data);
 
 	return datum;
 }
@@ -1213,8 +1297,9 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 	TransactionId remote_xid;
 	XLogRecPtr	remote_final_lsn;
 	TimestampTz remote_commit_ts;
-	HeapTuple	tuple;
+	bool		omitted = false;
 	Oid			replica_index;
+	HeapTuple	tuple;
 
 	Assert(conflictlogrel != NULL);
 
@@ -1256,7 +1341,6 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 	else
 		nulls[attno++] = true;
 
-
 	/*
 	 * All conflicts logged to the table are LOG-level update or delete
 	 * conflicts, which always have a searchslot. Insert conflicts, which
@@ -1275,9 +1359,10 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 	if (OidIsValid(replica_index))
 	{
 		values[attno++] = BoolGetDatum(false);
-		values[attno++] = tuple_table_slot_to_indextup_json(estate, rel,
-															replica_index,
-															searchslot);
+		values[attno++] = build_index_key_json(estate, rel,
+											   replica_index,
+											   searchslot,
+											   &omitted);
 	}
 	else
 	{
@@ -1290,9 +1375,11 @@ insert_conflict_log_tuple(EState *estate, Relation rel,
 	 * conflicting rows, so set local_conflicts to NULL.
 	 */
 	if (conflicttuples != NIL)
-		values[attno] = build_local_conflicts_json_array(conflicttuples);
+		values[attno++] = build_local_conflicts_json_array(conflicttuples);
 	else
-		nulls[attno] = true;
+		nulls[attno++] = true;
+
+	values[attno] = BoolGetDatum(omitted);
 
 	Assert(attno + 1 == NUM_CONFLICT_ATTRS);
 
